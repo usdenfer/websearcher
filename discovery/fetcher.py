@@ -9,6 +9,43 @@ from crawler import PAGE_TIMEOUT, USER_AGENT, fetch_html_retry
 from discovery.models import BudgetManager, DiscoveryStats
 
 
+def _url_parts(
+    url: str,
+) -> tuple[str, str, int | None, str] | None:
+    try:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        host = (parts.hostname or "").lower().rstrip(".")
+        port = parts.port
+    except (TypeError, ValueError):
+        return None
+    if scheme not in {"http", "https"} or not host:
+        return None
+    return scheme, host, port, parts.path
+
+
+def _host_key(url: str) -> tuple[str, int | None]:
+    parsed = _url_parts(url)
+    if parsed is None:
+        return "<invalid-url>", None
+    scheme, host, port, _path = parsed
+    effective_port = port
+    if effective_port is None:
+        effective_port = 443 if scheme == "https" else 80
+    return host, effective_port
+
+
+def _sanitize_url(url: str) -> str:
+    parsed = _url_parts(url)
+    if parsed is None:
+        return "<invalid-url>"
+    scheme, host, port, path = parsed
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    port_suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{display_host}{port_suffix}{path or '/'}"
+
+
 class DiscoveryFetcher:
     def __init__(
         self,
@@ -23,15 +60,13 @@ class DiscoveryFetcher:
         self.stats = stats
         self.semaphore = asyncio.Semaphore(concurrency)
         self.per_host_concurrency = per_host_concurrency
-        self.host_semaphores: dict[str, asyncio.Semaphore] = {}
+        self.host_semaphores: dict[
+            tuple[str, int | None], asyncio.Semaphore
+        ] = {}
 
     def host_semaphore(self, url: str) -> asyncio.Semaphore:
-        try:
-            host = urlsplit(url).netloc.lower()
-        except ValueError:
-            host = url.lower()
         return self.host_semaphores.setdefault(
-            host, asyncio.Semaphore(self.per_host_concurrency)
+            _host_key(url), asyncio.Semaphore(self.per_host_concurrency)
         )
 
     def _reserve(self) -> bool:
@@ -49,9 +84,13 @@ class DiscoveryFetcher:
                     self.client, url, attempts=2, base_delay=1.0
                 )
             except ValueError:
-                self.stats.warnings.append(f"{url}: 非 HTML 内容")
+                self.stats.warnings.append(
+                    f"{_sanitize_url(url)}: 非 HTML 内容"
+                )
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-                self.stats.warnings.append(f"{url}: {type(exc).__name__}")
+                self.stats.warnings.append(
+                    f"{_sanitize_url(url)}: {type(exc).__name__}"
+                )
         return None
 
     async def fetch_rendered(
@@ -66,7 +105,7 @@ class DiscoveryFetcher:
                 html, links = await renderer.render_page(url)
             except Exception as exc:
                 self.stats.warnings.append(
-                    f"{url}: render {type(exc).__name__}"
+                    f"{_sanitize_url(url)}: render {type(exc).__name__}"
                 )
                 return None
         self.stats.rendered_pages += 1

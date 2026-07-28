@@ -89,6 +89,10 @@ def test_fetch_rendered_shares_budget_and_counts_only_success(monkeypatch):
 def test_request_error_warning_does_not_leak_exception_message():
     async def run():
         secret = "api_key=do-not-leak"
+        url = (
+            "https://user:secret@X.test:443/a"
+            "?token=SECRET#fragment"
+        )
 
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError(secret, request=request)
@@ -98,15 +102,25 @@ def test_request_error_warning_does_not_leak_exception_message():
             transport=httpx.MockTransport(handler)
         ) as client:
             fetcher = DiscoveryFetcher(client, BudgetManager(), stats)
-            assert await fetcher.fetch_html("https://x.test/a") is None
+            assert await fetcher.fetch_html(url) is None
 
         assert stats.warnings == ["https://x.test/a: ConnectError"]
         assert secret not in stats.warnings[0]
+        assert all(
+            sensitive not in stats.warnings[0]
+            for sensitive in (
+                "user",
+                "secret",
+                "token",
+                "SECRET",
+                "fragment",
+            )
+        )
 
     asyncio.run(run())
 
 
-def test_host_semaphore_is_reused_and_malformed_url_is_safe():
+def test_host_semaphore_uses_canonical_host_and_effective_port():
     async def run():
         async with httpx.AsyncClient() as client:
             fetcher = DiscoveryFetcher(
@@ -115,11 +129,26 @@ def test_host_semaphore_is_reused_and_malformed_url_is_safe():
                 DiscoveryStats(),
                 per_host_concurrency=3,
             )
-            first = fetcher.host_semaphore("https://Example.test/a")
-            second = fetcher.host_semaphore("https://example.test/b")
+            https_default = fetcher.host_semaphore(
+                "https://user:secret@Example.test.:443/a"
+            )
+            https_implicit = fetcher.host_semaphore(
+                "https://example.test/b"
+            )
+            https_non_default = fetcher.host_semaphore(
+                "https://example.test:8443/c"
+            )
+            http_default = fetcher.host_semaphore("http://example.test:80")
+            http_implicit = fetcher.host_semaphore("http://EXAMPLE.test/")
+            ipv6_default = fetcher.host_semaphore("https://[::1]:443/a")
+            ipv6_implicit = fetcher.host_semaphore("https://[::1]/b")
             malformed = fetcher.host_semaphore("http://[invalid")
 
-        assert first is second
+        assert https_default is https_implicit
+        assert http_default is http_implicit
+        assert ipv6_default is ipv6_implicit
+        assert https_non_default is not https_default
+        assert http_default is not https_default
         assert malformed is fetcher.host_semaphore("http://[invalid")
 
     asyncio.run(run())
