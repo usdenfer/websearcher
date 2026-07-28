@@ -59,7 +59,7 @@ class _DiscoverySiteHandler(http.server.BaseHTTPRequestHandler):
             self._send_html("""
                 <html><head><title>搜索结果</title></head><body>
                   <main><div class="result">
-                    <a href="/deep/article.html">普通公告</a>
+                    <a href="/ordinary.html">普通候选</a>
                   </div></main>
                 </body></html>
             """)
@@ -108,6 +108,14 @@ class _DiscoverySiteHandler(http.server.BaseHTTPRequestHandler):
                   <article>
                     <p>采购说明中的随机正文标记 {self.keyword}。</p>
                   </article>
+                </body></html>
+            """)
+            return
+
+        if request.path == "/ordinary.html":
+            self._send_html("""
+                <html><head><title>普通候选</title></head><body>
+                  <article><p>这里没有目标正文。</p></article>
                 </body></html>
             """)
             return
