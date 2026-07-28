@@ -351,6 +351,68 @@ def test_generic_discovery_extends_policy_and_deduplicates_specs_categories(
     assert context.exited is True
 
 
+def test_redirected_homepage_url_drives_all_site_discovery(monkeypatch):
+    actual_home = "https://www.new.test/sub/"
+    fresh = Candidate(
+        "https://www.new.test/sub/article.html",
+        "sitemap",
+        score=90,
+    )
+    context, provider_records, fetchers = _install_engine_fakes(
+        monkeypatch,
+        batches={
+            "sitemap": [
+                Candidate(actual_home, "sitemap", score=100),
+                fresh,
+            ]
+        },
+    )
+    homepage = """
+    <html>
+      <head>
+        <link rel="alternate" type="application/rss+xml" href="feed.xml">
+      </head>
+      <body>
+        <form method="get" action="search">
+          <input name="q"><button>搜索</button>
+        </form>
+        <a href="news/">新闻</a>
+      </body>
+    </html>
+    """
+
+    result = _run(
+        discover_pages(
+            "https://old.test/original",
+            ["alpha"],
+            CrawlResult(pages=[CrawledPage(actual_home, homepage)]),
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    by_source = {source: provider for source, provider, _ in provider_records}
+    assert by_source["sitemap"].args == ("https://www.new.test",)
+    assert by_source["feed"].args == (
+        ["https://www.new.test/sub/feed.xml"],
+    )
+    assert by_source["category"].args == (
+        ["https://www.new.test/sub/news"],
+    )
+    assert [spec.url for spec in by_source["site-search"].args[0]] == [
+        "https://www.new.test/sub/search"
+    ]
+    assert all(
+        policy.root_host == "www.new.test"
+        and policy.allows("www.new.test")
+        and not policy.allows("old.test")
+        for _source, _provider, policy in provider_records
+    )
+    assert fetchers[0].urls == [fresh.url]
+    assert [page.url for page in result.pages] == [fresh.url]
+    assert context.exited is True
+
+
 def test_freecms_uses_api_provider_and_keeps_category_fallback(monkeypatch):
     import discovery.engine as engine
 

@@ -145,8 +145,11 @@ async def discover_pages(
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
     homepage = base_result.pages[0].html if base_result.pages else ""
-    adapter = select_adapter(start_url, homepage)
-    policy = adapter.domain_policy(start_url)
+    effective_start_url = (
+        base_result.pages[0].url if base_result.pages else start_url
+    )
+    adapter = select_adapter(effective_start_url, homepage)
+    policy = adapter.domain_policy(effective_start_url)
     stats = DiscoveryStats(profile=adapter.profile)
     if started_at is None:
         started_at = time.monotonic()
@@ -156,9 +159,9 @@ async def discover_pages(
         started_at=started_at,
     )
 
-    detected_specs = detect_search_specs(homepage, start_url)
+    detected_specs = detect_search_specs(homepage, effective_start_url)
     feed_urls = list(
-        dict.fromkeys(detect_feed_urls(homepage, start_url))
+        dict.fromkeys(detect_feed_urls(homepage, effective_start_url))
     )
     if adapter.profile == "generic":
         policy = extend_policy_with_declared_urls(
@@ -172,11 +175,13 @@ async def discover_pages(
         dict.fromkeys(
             [
                 *adapter.category_urls(),
-                *detect_category_urls(homepage, start_url, policy),
+                *detect_category_urls(
+                    homepage, effective_start_url, policy
+                ),
             ]
         )
     )
-    origin = _safe_origin(start_url)
+    origin = _safe_origin(effective_start_url)
 
     async with make_client() as client:
         fetcher = DiscoveryFetcher(client, budget, stats)
