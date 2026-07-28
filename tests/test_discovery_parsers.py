@@ -56,6 +56,17 @@ def test_search_detection_is_case_insensitive_and_requires_search_semantics():
     ]
 
 
+def test_detects_declarative_data_action_without_visible_search_text():
+    specs = detect_search_specs(
+        '<div data-action="/lookup"><input name="q"></div>',
+        "https://example.test/",
+    )
+
+    assert [(spec.url, spec.query_param) for spec in specs] == [
+        ("https://example.test/lookup", "q")
+    ]
+
+
 def test_parses_result_candidates_and_pagination():
     html = fixture("generic_results.html")
 

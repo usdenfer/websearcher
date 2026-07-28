@@ -91,10 +91,7 @@ def detect_search_specs(html: str, base_url: str) -> list[SearchSpec]:
             ),
             None,
         )
-        if (
-            query_input is None
-            or not _has_search_semantics(node)
-        ):
+        if query_input is None:
             continue
         action = _safe_absolute_url(base_url, node["data-action"])
         if action:
