@@ -606,6 +606,48 @@ def test_live_budget_after_providers_controls_initial_and_expanded_fetches(
     assert result.stats.partial is True
 
 
+def test_default_budget_caps_150_candidates_at_120_pages_including_base(
+    monkeypatch,
+):
+    import discovery.engine as engine
+
+    candidates = [
+        Candidate(
+            f"https://x.test/archive/{index}.html",
+            "sitemap",
+            score=100,
+            section=f"section-{index}",
+        )
+        for index in range(150)
+    ]
+    _context, _providers, fetchers = _install_engine_fakes(
+        monkeypatch,
+        batches={"sitemap": candidates},
+    )
+    monkeypatch.setattr(engine, "rank_candidates", lambda items: items)
+
+    base = CrawlResult(
+        pages=[CrawledPage("https://x.test/", "<html>home</html>")]
+    )
+    result = _run(
+        discover_pages(
+            "https://x.test/",
+            ["BODY-BUDGET-120"],
+            base,
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    assert result.stats.candidates_found == 150
+    assert result.stats.budget_expanded is True
+    assert result.stats.partial is True
+    assert len(fetchers[0].urls) == 119
+    assert result.stats.candidates_fetched <= 119
+    assert len(base.pages) + result.stats.candidates_fetched <= 120
+    assert fetchers[0].budget.used_html_pages == 120
+
+
 def test_budget_does_not_expand_for_only_low_value_remaining(monkeypatch):
     import discovery.engine as engine
 

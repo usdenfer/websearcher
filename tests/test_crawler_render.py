@@ -141,7 +141,7 @@ def _dynamic_discovery_crawl(monkeypatch, *, target_on_start=False, depth=1):
 
     async def fake_fetch_html_retry(client, url, attempts=4, base_delay=1.5):
         if url == TARGET:
-            return "<html><body>王丹莉的旧文章正文</body></html>"
+            return "<html><body>随机正文标记 DYNAMIC-BODY-4821</body></html>"
         return "<html><body>普通文章正文</body></html>"
 
     monkeypatch.setattr(renderer, "render_page", fake_render)
@@ -156,7 +156,7 @@ def test_render_discovery_fetches_buried_dynamic_hub_articles_at_every_depth(
     target_pages = [page for page in result.pages if page.url == TARGET]
 
     assert len(target_pages) == 1
-    assert "王丹莉" in target_pages[0].html
+    assert "DYNAMIC-BODY-4821" in target_pages[0].html
     assert len(result.pages) <= crawler.RENDER_MAX_PAGES
 
 

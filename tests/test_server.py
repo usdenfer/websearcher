@@ -25,6 +25,23 @@ def test_search_hit_structure(site_server):
     resp = search(site_server, ["alpha", "beta"])
     assert resp.status_code == 200
     data = resp.json()
+    assert {
+        "startUrl",
+        "keywords",
+        "expandedKeywords",
+        "depth",
+        "render",
+        "renderMode",
+        "autoNote",
+        "siteSearch",
+        "pagesCrawled",
+        "crawledPages",
+        "pagesFailed",
+        "totalHits",
+        "results",
+        "searchId",
+        "discovery",
+    } <= data.keys()
     assert data["pagesCrawled"] == 3
     assert len(data["crawledPages"]) == 3
     assert data["pagesFailed"] == [
