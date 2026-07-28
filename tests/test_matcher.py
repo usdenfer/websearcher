@@ -175,6 +175,20 @@ def test_extract_main_text_removes_noise_classes_and_hidden_content():
     ))
 
 
+def test_extract_main_text_removes_aria_hidden_case_insensitively():
+    html = """
+    <main>
+      <div aria-hidden="TRUE">UPPER-HIDDEN-4182</div>
+      <div aria-hidden=" True ">MIXED-HIDDEN-5293</div>
+      <p>可见正文 VISIBLE-MARK-6304</p>
+    </main>
+    """
+    text = extract_main_text(html)
+    assert "VISIBLE-MARK-6304" in text
+    assert "UPPER-HIDDEN-4182" not in text
+    assert "MIXED-HIDDEN-5293" not in text
+
+
 def test_extract_main_text_uses_role_main():
     html = """
     <body>
@@ -197,6 +211,18 @@ def test_extract_main_text_does_not_choose_tiny_article_over_main_content():
     """
     text = extract_main_text(html)
     assert "FULL-BODY-6421" in text
+
+
+def test_extract_main_text_chooses_longer_main_over_long_article():
+    article_text = "文章片段" * 25
+    main_text = "完整正文" * 40 + " LONG-MAIN-7415"
+    html = (
+        f"<body><article>{article_text}</article>"
+        f"<main>{main_text}</main></body>"
+    )
+    text = extract_main_text(html)
+    assert "LONG-MAIN-7415" in text
+    assert text == main_text
 
 
 def test_match_body_page_strips_and_stably_deduplicates_keywords():

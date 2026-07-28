@@ -173,32 +173,24 @@ def extract_main_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for node in soup.select(NOISE_SELECTORS):
         node.decompose()
+    for node in soup.select("[aria-hidden]"):
+        value = node.get("aria-hidden")
+        if isinstance(value, str) and value.strip().lower() == "true":
+            node.decompose()
 
-    candidates = []
+    candidates: list[tuple[object, str]] = []
     seen: set[int] = set()
     for selector in MAIN_CONTENT_SELECTORS:
         for node in soup.select(selector):
             identity = id(node)
-            if identity not in seen and _node_text(node):
+            text = _node_text(node)
+            if identity not in seen and text:
                 seen.add(identity)
-                candidates.append(node)
+                candidates.append((node, text))
 
-    preferred = candidates[0] if candidates else None
-    if preferred is not None:
-        preferred_text = _node_text(preferred)
-        for candidate in candidates[1:]:
-            candidate_text = _node_text(candidate)
-            contains_preferred = preferred in candidate.descendants
-            preferred_is_tiny = len(preferred_text) < 80
-            substantially_larger = (
-                len(candidate_text) >= len(preferred_text) * 2
-                and len(candidate_text) - len(preferred_text) >= 10
-            )
-            if substantially_larger and (
-                    contains_preferred or preferred_is_tiny):
-                preferred = candidate
-                preferred_text = candidate_text
-
+    preferred = None
+    if candidates:
+        preferred = max(candidates, key=lambda item: len(item[1]))[0]
     root = preferred or soup.body
     return _node_text(root) if root is not None else ""
 
