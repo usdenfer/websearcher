@@ -60,42 +60,97 @@ class Provider:
         source = source or self.source
         self.stats.sources_tried.add(source)
         budget_key = budget_source or source
-        provider_used = self.budget.provider_requests.get(budget_key, 0)
-        if self.budget.expired() or provider_used >= limit:
-            return None
-        if (
-            counts_as_html
-            and self.budget.used_html_pages >= self.budget.page_limit
-        ):
-            self.stats.partial = True
-            return None
-        if not self.budget.reserve_provider(budget_key, limit):
-            return None
-        if counts_as_html and not self.budget.reserve_html():
-            if provider_used:
-                self.budget.provider_requests[budget_key] = provider_used
-            else:
-                self.budget.provider_requests.pop(budget_key, None)
-            self.stats.partial = True
-            return None
-        try:
+        current_url = url
+        current_params = params
+        initial_normalized = normalize_candidate_url(url)
+        visited: set[str] = (
+            {initial_normalized} if initial_normalized else set()
+        )
+
+        for hop in range(11):
+            provider_used = self.budget.provider_requests.get(
+                budget_key, 0
+            )
             remaining = self.budget.remaining_seconds()
             if remaining <= 0:
                 self.stats.partial = True
                 return None
-            async with asyncio.timeout(remaining):
-                response = await self.client.get(url, params=params)
+            if provider_used >= limit:
+                return None
+            if (
+                counts_as_html
+                and self.budget.used_html_pages >= self.budget.page_limit
+            ):
+                self.stats.partial = True
+                return None
+
+            # Both reservations are synchronous and contain no await, so the
+            # checks and increments form one event-loop-atomic decision.
+            if not self.budget.reserve_provider(budget_key, limit):
+                return None
+            if counts_as_html and not self.budget.reserve_html():
+                self.stats.partial = True
+                return None
+
+            try:
+                async with asyncio.timeout(remaining):
+                    response = await self.client.get(
+                        current_url,
+                        params=current_params,
+                        follow_redirects=False,
+                    )
+            except TimeoutError:
+                self.stats.partial = True
+                return None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.stats.warnings.append(
+                    f"{source}: {type(exc).__name__}"
+                )
+                return None
+
+            location = response.headers.get("location")
+            if response.is_redirect:
+                if not location:
+                    self.stats.warnings.append(
+                        f"{source}: 重定向缺少目标"
+                    )
+                    return None
+                if hop >= 10:
+                    self.stats.warnings.append(
+                        f"{source}: 重定向次数过多"
+                    )
+                    return None
+                target = urljoin(str(response.url), location)
+                normalized = normalize_candidate_url(target)
+                if not normalized or not url_allowed(target, self.policy):
+                    self.stats.warnings.append(
+                        f"{source}: 重定向目标不在允许范围"
+                    )
+                    return None
+                if normalized in visited:
+                    self.stats.warnings.append(
+                        f"{source}: 重定向循环"
+                    )
+                    return None
+                visited.add(normalized)
+                current_url = target
+                current_params = None
+                continue
+
+            try:
                 response.raise_for_status()
-        except TimeoutError:
-            self.stats.partial = True
-            return None
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.stats.warnings.append(f"{source}: {type(exc).__name__}")
-            return None
-        self.stats.sources_succeeded.add(source)
-        return response.text, str(response.url)
+            except Exception as exc:
+                self.stats.warnings.append(
+                    f"{source}: {type(exc).__name__}"
+                )
+                return None
+            self.stats.sources_succeeded.add(source)
+            return response.text, str(response.url)
+
+        self.stats.warnings.append(f"{source}: 重定向次数过多")
+        return None
 
 
 class SearchProvider(Provider):

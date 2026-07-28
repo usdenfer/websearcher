@@ -16,6 +16,7 @@ from discovery.providers import (
     CategoryProvider,
     FeedProvider,
     FreeCmsApiProvider,
+    Provider,
     SearchProvider,
     SitemapProvider,
     YunnanCmsProvider,
@@ -23,6 +24,158 @@ from discovery.providers import (
 
 
 POLICY = DomainPolicy("x.test", frozenset({"x.test"}))
+
+
+def test_provider_redirect_refuses_target_before_over_budget_request():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            return httpx.Response(
+                302, headers={"location": "/final"}
+            )
+
+        budget = BudgetManager(initial_pages=1, max_pages=1)
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            loaded = await Provider(
+                client, budget, stats, POLICY
+            ).get_text("https://x.test/start", limit=10)
+
+        assert loaded is None
+        assert requested == ["https://x.test/start"]
+        assert budget.used_html_pages == 1
+        assert budget.provider_requests == {"unknown": 1}
+        assert stats.partial is True
+
+    asyncio.run(run())
+
+
+def test_provider_redirect_counts_each_hop_and_applies_params_once():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            if request.url.path == "/start":
+                return httpx.Response(
+                    302, headers={"location": "/final?next=1"}
+                )
+            return httpx.Response(200, text="<main>done</main>")
+
+        budget = BudgetManager(initial_pages=2, max_pages=2)
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            loaded = await Provider(
+                client, budget, stats, POLICY
+            ).get_text(
+                "https://x.test/start",
+                limit=10,
+                params={"q": "alpha"},
+            )
+
+        assert loaded == (
+            "<main>done</main>",
+            "https://x.test/final?next=1",
+        )
+        assert requested == [
+            "https://x.test/start?q=alpha",
+            "https://x.test/final?next=1",
+        ]
+        assert budget.used_html_pages == 2
+        assert budget.provider_requests == {"unknown": 2}
+        assert stats.sources_succeeded == {"unknown"}
+
+    asyncio.run(run())
+
+
+def test_provider_blocks_offsite_redirect_without_requesting_target():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            return httpx.Response(
+                302,
+                headers={
+                    "location": "https://evil.test/secret?token=leak"
+                },
+            )
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            loaded = await Provider(
+                client, BudgetManager(), stats, POLICY
+            ).get_text("https://x.test/start")
+
+        assert loaded is None
+        assert requested == ["https://x.test/start"]
+        assert stats.sources_succeeded == set()
+        assert any("重定向" in item for item in stats.warnings)
+        assert "evil.test" not in " ".join(stats.warnings)
+        assert "token" not in " ".join(stats.warnings)
+
+    asyncio.run(run())
+
+
+def test_non_html_provider_redirect_counts_only_provider_requests():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/sitemap.xml":
+                return httpx.Response(
+                    302, headers={"location": "/sitemap-final.xml"}
+                )
+            return httpx.Response(200, text="<urlset/>")
+
+        budget = BudgetManager()
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            loaded = await Provider(
+                client, budget, stats, POLICY
+            ).get_text(
+                "https://x.test/sitemap.xml",
+                counts_as_html=False,
+                limit=5,
+            )
+
+        assert loaded == (
+            "<urlset/>",
+            "https://x.test/sitemap-final.xml",
+        )
+        assert budget.used_html_pages == 0
+        assert budget.provider_requests == {"unknown": 2}
+
+    asyncio.run(run())
+
+
+def test_provider_rejects_redirect_without_location():
+    async def run():
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(302)
+            )
+        ) as client:
+            loaded = await Provider(
+                client, BudgetManager(), stats, POLICY
+            ).get_text("https://x.test/start")
+
+        assert loaded is None
+        assert stats.sources_succeeded == set()
+        assert stats.warnings == ["unknown: 重定向缺少目标"]
+
+    asyncio.run(run())
 
 
 def test_search_provider_returns_unique_candidates_from_results_and_pagination():

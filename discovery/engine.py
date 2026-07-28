@@ -332,17 +332,37 @@ async def discover_pages(
             0, budget.page_limit - budget.used_html_pages
         )
         first_batch = pending[:first_capacity]
+        first_success_urls: set[str] = set()
         if first_batch:
             fetched, timed_out = await _gather_candidates(
                 [fetch(item) for item in first_batch],
                 budget,
             )
             stats.partial = stats.partial or timed_out
-            pages.extend(page for page in fetched if page is not None)
+            successful_pages = [
+                page for page in fetched if page is not None
+            ]
+            pages.extend(successful_pages)
+            first_success_urls.update(
+                normalize_candidate_url(page.url)
+                for page in successful_pages
+            )
             scheduled_count += len(first_batch)
 
-        remaining = pending[len(first_batch) :]
-        high_value = [item for item in remaining if item.score >= 55]
+        remaining = [
+            *pending[len(first_batch) :],
+            *[
+                item
+                for item in first_batch
+                if item.url not in first_success_urls
+            ],
+        ]
+        high_value = list({
+            item.url: item
+            for item in remaining
+            if item.score >= 55
+            and item.url not in first_success_urls
+        }.values())
         if budget.expand(len(high_value)):
             stats.budget_expanded = True
             second_capacity = max(

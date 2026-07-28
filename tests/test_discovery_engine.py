@@ -846,7 +846,7 @@ def test_fetch_failure_is_counted_as_found_not_fetched(monkeypatch):
         )
     )
 
-    assert fetchers[0].urls == [candidate.url]
+    assert fetchers[0].urls == [candidate.url, candidate.url]
     assert result.stats.candidates_found == 1
     assert result.stats.candidates_fetched == 0
 
@@ -930,3 +930,47 @@ def test_provider_deadline_keeps_completed_batches_and_marks_partial(
     assert time.monotonic() - started < 0.2
     assert result.stats.candidates_found == 1
     assert result.stats.partial is True
+
+
+def test_failed_high_value_items_from_first_batch_are_retried_after_expand(
+    monkeypatch,
+):
+    budget = BudgetManager(initial_pages=2, max_pages=4)
+    candidates = [
+        Candidate("https://x.test/a", "sitemap", score=100),
+        Candidate("https://x.test/b", "sitemap", score=90),
+    ]
+    calls: dict[str, int] = {}
+
+    def fetch_html(url):
+        calls[url] = calls.get(url, 0) + 1
+        if url.endswith("/a") and calls[url] == 1:
+            assert budget.reserve_html()
+            return None
+        return f"<main>{url}</main>"
+
+    _install_engine_fakes(
+        monkeypatch,
+        batches={"sitemap": candidates},
+        fetch_html=fetch_html,
+    )
+
+    result = _run(discover_pages(
+        "https://x.test/",
+        ["alpha"],
+        CrawlResult(),
+        depth=1,
+        render_mode="off",
+        budget=budget,
+    ))
+
+    assert result.stats.budget_expanded is True
+    assert {page.url for page in result.pages} == {
+        "https://x.test/a",
+        "https://x.test/b",
+    }
+    assert budget.used_html_pages == 4
+    assert calls == {
+        "https://x.test/a": 2,
+        "https://x.test/b": 1,
+    }
