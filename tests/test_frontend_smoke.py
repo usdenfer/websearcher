@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 import uvicorn
@@ -15,6 +16,23 @@ pytest.importorskip("playwright")
 
 import cache
 import server  # noqa: E402
+
+
+STATIC_INDEX = Path(__file__).parents[1] / "static" / "index.html"
+
+
+def test_frontend_renders_discovery_diagnostics():
+    html = STATIC_INDEX.read_text(encoding="utf-8")
+    assert "data.discovery" in html
+    assert "sourcesSucceeded" in html
+    assert "partial" in html
+    assert "已达到搜索预算" in html
+
+
+def test_frontend_escapes_discovery_warnings():
+    html = STATIC_INDEX.read_text(encoding="utf-8")
+    assert "discovery.warnings" in html
+    assert "escapeHtml(warning)" in html
 
 
 def _chromium_ok() -> bool:

@@ -287,9 +287,15 @@ function render(data) {
   } else {
     el.hidden = true;
   }
+  const discovery = data.discovery || {};
+  const sources = (discovery.sourcesSucceeded || []).join("、");
   let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（深度 ${data.depth} 层${data.render ? "，JS 渲染" : ""}${
     data.siteSearch && data.siteSearch.pagesFetched > 0
       ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），命中 ${data.totalHits} 处。${
+    sources ? `<br>有效发现来源：${escapeHtml(sources)}` : ""}${
+    discovery.budgetExpanded ? "<br>已启用扩展页面预算。" : ""}${
+    discovery.partial
+      ? "<br><strong>已达到搜索预算，结果可能不完整。</strong>" : ""}${
     data.autoNote ? `<br>${escapeHtml(data.autoNote)}` : ""}</p>`;
   if (data.totalHits === 0) {
     const kw = data.keywords.map(k => `「${escapeHtml(k)}」`).join("、");
@@ -320,6 +326,12 @@ function render(data) {
     html += `<details><summary>${data.pagesFailed.length} 个页面抓取失败（不影响结果）</summary><ul>` +
       data.pagesFailed.map(f =>
         `<li>${escapeHtml(f.url)} — ${escapeHtml(f.reason)}</li>`).join("") +
+      `</ul></details>`;
+  }
+  if ((discovery.warnings || []).length) {
+    html += `<details><summary>发现通道提示</summary><ul>` +
+      discovery.warnings.map(warning =>
+        `<li>${escapeHtml(warning)}</li>`).join("") +
       `</ul></details>`;
   }
   out.innerHTML = html;
