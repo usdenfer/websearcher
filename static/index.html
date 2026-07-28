@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>站内关键词搜索</title>
+<style>
+  :root { --accent:#2f6fed; --bg:#f6f7f9; --card:#fff; --line:#e3e6eb; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:#222; }
+  header { background:var(--card); border-bottom:1px solid var(--line);
+           padding:16px 24px; position:sticky; top:0; z-index:2; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; }
+  input { padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+          font-size:14px; }
+  select { padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+           font-size:14px; background:#fff; }
+  #url { flex:2 1 320px; } #kw { flex:1 1 200px; }
+  button { padding:9px 20px; border:0; border-radius:8px; background:var(--accent);
+           color:#fff; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:default; }
+  main { max-width:960px; margin:24px auto; padding:0 16px 48px; }
+  .status { padding:24px; text-align:center; color:#666; }
+  .spinner { display:inline-block; width:18px; height:18px; margin-right:8px;
+             border:3px solid var(--line); border-top-color:var(--accent);
+             border-radius:50%; animation:spin .8s linear infinite;
+             vertical-align:-4px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .card { background:var(--card); border:1px solid var(--line);
+          border-radius:10px; margin-bottom:16px; overflow:hidden; }
+  .card h2 { font-size:15px; margin:0; padding:12px 16px;
+             border-bottom:1px solid var(--line); word-break:break-all; }
+  .card h2 a { color:var(--accent); text-decoration:none; }
+  .hit { display:flex; gap:10px; align-items:flex-start;
+         padding:10px 16px; border-top:1px solid #f0f1f4; font-size:14px; }
+  .hit:first-of-type { border-top:0; }
+  .badge { flex:0 0 auto; font-size:12px; padding:2px 8px; border-radius:20px;
+           background:#eef3ff; color:var(--accent); white-space:nowrap; }
+  .snippet { flex:1 1 auto; word-break:break-all; line-height:1.6; }
+  mark { background:#ffe58f; padding:0 1px; border-radius:2px; }
+  .jump { flex:0 0 auto; font-size:12px; color:var(--accent);
+          text-decoration:none; padding-top:2px; }
+  .actions { flex:0 0 auto; display:flex; flex-direction:column; gap:4px;
+             align-items:flex-end; }
+  .linkref { font-size:12px; color:#888; word-break:break-all; }
+  .linkref a { color:var(--accent); text-decoration:none; }
+  .empty { background:#fff8e6; border:1px solid #ffe1a8; border-radius:10px;
+           padding:20px 24px; }
+  .empty h2 { margin:0 0 10px; font-size:16px; color:#8a5a00; }
+  .empty ul { margin:8px 0 0; padding-left:20px; font-size:13px; color:#666; }
+  details { font-size:13px; color:#666; margin-top:8px; }
+  .error { background:#fdecec; border:1px solid #f5c2c2; color:#a33;
+           border-radius:10px; padding:16px 20px; }
+  .meta-line { font-size:13px; color:#777; margin:0 0 16px; }
+  .ai-card { background:var(--card); border:1px solid var(--line);
+             border-radius:10px; padding:16px 20px;
+             max-width:928px; margin:24px auto 0; }
+  @media (max-width:992px) { .ai-card { margin:24px 16px 0; } }
+  .ai-card h3 { margin:0 0 10px; font-size:15px; }
+  .expand-line { font-size:13px; color:#8a5a00; background:#fff8e6;
+                 border:1px solid #ffe1a8; border-radius:8px;
+                 padding:6px 10px; margin-bottom:10px; }
+  .ai-out { font-size:14px; line-height:1.8; white-space:normal;
+            word-break:break-all; }
+  .ai-out a { color:var(--accent); }
+  .ai-error { color:#a33; font-size:13px; margin-top:8px; }
+  .qa { border-top:1px solid var(--line); margin-top:12px; padding-top:12px; }
+  .qa-item { margin-bottom:12px; }
+  .qa-q { font-weight:600; font-size:14px; margin-bottom:4px; }
+  .qa-input { display:flex; gap:8px; margin-top:8px; }
+  .qa-input input { flex:1; }
+  .ai-btn { font-size:13px; padding:7px 14px; }
+  .cursor { display:inline-block; width:8px; height:14px;
+            background:var(--accent); vertical-align:-2px;
+            animation:blink .7s step-start infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  .job-form { display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+              margin-bottom:14px; }
+  .job-form input[type="text"], .job-form input[type="url"] { flex:1 1 180px; }
+  .job-form input[type="time"], .job-form input[type="number"] { width:110px; }
+  .job-row { border-top:1px solid #f0f1f4; padding:10px 0; font-size:13px; }
+  .job-row:first-of-type { border-top:0; }
+  .job-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .job-name { font-weight:600; font-size:14px; }
+  .job-sched { color:#666; }
+  .job-meta { color:#777; margin-top:4px; word-break:break-all; }
+  .job-result { margin-top:4px; color:#555; }
+  .job-error { margin-top:4px; color:#a33; }
+  .job-ops { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  .job-ops button { font-size:12px; padding:5px 12px; }
+  .job-ops .danger { background:#c0392b; }
+  .job-ops .ghost { background:#8a94a6; }
+  .new-badge { display:inline-block; font-size:12px; padding:1px 8px;
+               border-radius:20px; background:#fdecec; color:#c0392b;
+               font-weight:600; margin-left:6px; }
+  .base-badge { display:inline-block; font-size:12px; padding:1px 8px;
+                border-radius:20px; background:#eef3ff; color:var(--accent);
+                margin-left:6px; }
+  .job-empty { color:#888; font-size:13px; }
+  .switch { position:relative; display:inline-block; width:36px; height:20px; }
+  .switch input { display:none; }
+  .switch .slider { position:absolute; inset:0; border-radius:20px;
+                    background:#cbd2dc; transition:.2s; cursor:pointer; }
+  .switch .slider::before { content:""; position:absolute; width:16px;
+                    height:16px; left:2px; top:2px; border-radius:50%;
+                    background:#fff; transition:.2s; }
+  .switch input:checked + .slider { background:var(--accent); }
+  .switch input:checked + .slider::before { transform:translateX(16px); }
+</style>
+</head>
+<body>
+<header>
+  <h1>站内关键词搜索</h1>
+  <div class="bar">
+    <input id="url" type="url" placeholder="起始网址，如 https://example.com">
+    <input id="kw" type="text" placeholder="关键词（多个用空格分隔）">
+    <select id="depth" title="搜索深度：层数越大范围越广、耗时越长">
+      <option value="1">深度 1 层</option>
+      <option value="2">深度 2 层</option>
+      <option value="3">深度 3 层</option>
+    </select>
+    <select id="render" title="抓取方式：自动模式先静态快搜，结果不完整时自动用浏览器渲染补搜">
+      <option value="auto">自动模式</option>
+      <option value="on">强制 JS 渲染</option>
+      <option value="off">仅静态（最快）</option>
+    </select>
+    <button id="go">搜索</button>
+  </div>
+</header>
+<section id="aiSection" class="ai-card" hidden>
+  <h3>AI 助手</h3>
+  <div id="expandLine" class="expand-line" hidden></div>
+  <button id="sumBtn" class="ai-btn">生成 AI 摘要</button>
+  <div id="sumOut" class="ai-out" style="margin-top:10px"></div>
+  <div id="sumErr" class="ai-error"></div>
+  <div class="qa">
+    <div id="qaList"></div>
+    <div class="qa-input">
+      <input id="qaInput" type="text" placeholder="就本次搜索的页面内容提问…">
+      <button id="askBtn" class="ai-btn">提问</button>
+    </div>
+  </div>
+</section>
+<section id="jobSection" class="ai-card">
+  <h3>定时搜索任务</h3>
+  <div class="job-form">
+    <input id="jobName" type="text" placeholder="任务名（可选）">
+    <input id="jobUrl" type="url" placeholder="起始网址">
+    <input id="jobKw" type="text" placeholder="关键词（空格分隔）">
+  </div>
+  <div class="job-form">
+    <select id="jobDepth">
+      <option value="1">深度 1 层</option>
+      <option value="2">深度 2 层</option>
+      <option value="3">深度 3 层</option>
+    </select>
+    <select id="jobRender">
+      <option value="auto">自动模式</option>
+      <option value="on">强制 JS 渲染</option>
+      <option value="off">仅静态</option>
+    </select>
+    <select id="jobKind">
+      <option value="daily">每天定时</option>
+      <option value="interval">每隔 N 小时</option>
+    </select>
+    <input id="jobTime" type="time" value="09:30">
+    <input id="jobHours" type="number" min="1" max="168" value="6" hidden>
+    <button id="jobFill" type="button" class="ai-btn">填入当前搜索条件</button>
+    <button id="jobCreate" type="button">创建任务</button>
+  </div>
+  <div id="jobErr" class="ai-error"></div>
+  <div id="jobList"></div>
+</section>
+<main id="out"></main>
+<script>
+const KIND_LABELS = {
+  "text":"正文","img-alt":"图片alt","img-src":"图片文件名",
+  "title-attr":"title属性","aria-label":"aria标签","link-text":"链接文本",
+  "link-href":"链接地址","meta":"meta标签","form":"表单"
+};
+const out = document.getElementById("out");
+const btn = document.getElementById("go");
+
+let searchId = null;
+const aiSection = document.getElementById("aiSection");
+
+function linkify(escaped) {
+  return escaped.replace(/(https?:\/\/[^\s<>）】」"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener">$1</a>');
+}
+function renderStreamText(el, text, streaming) {
+  el.innerHTML = linkify(escapeHtml(text)).replace(/\n/g, "<br>") +
+    (streaming ? '<span class="cursor"></span>' : "");
+}
+
+async function streamSSE(url, body, onDelta) {
+  const resp = await fetch(url, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    let msg = "请求失败";
+    try { msg = (await resp.json()).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const {done, value} = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, {stream: true});
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+      const line = raw.split("\n").find(l => l.startsWith("data:"));
+      if (!line) continue;
+      let evt;
+      try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+      if (evt.type === "delta") onDelta(evt.text);
+      else if (evt.type === "error") throw new Error(evt.message);
+      else if (evt.type === "done") return;
+    }
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+function highlight(snippet, keywords) {
+  let html = escapeHtml(snippet);
+  for (const kw of keywords) {
+    const re = new RegExp(
+      kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    html = html.replace(re, m => `<mark>${m}</mark>`);
+  }
+  return html;
+}
+function showError(msg) {
+  out.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+}
+
+async function run() {
+  const startUrl = document.getElementById("url").value.trim();
+  const keywords = document.getElementById("kw").value.trim().split(/\s+/).filter(Boolean);
+  const depth = parseInt(document.getElementById("depth").value, 10);
+  const renderMode = document.getElementById("render").value;
+  if (!/^https?:\/\/.+/.test(startUrl)) { showError("请输入合法的 http/https 起始网址"); return; }
+  if (!keywords.length) { showError("请输入至少一个关键词"); return; }
+  searchId = null;
+  aiSection.hidden = true;
+  document.getElementById("sumOut").textContent = "";
+  document.getElementById("sumErr").textContent = "";
+  document.getElementById("qaList").innerHTML = "";
+  btn.disabled = true;
+  const hint = renderMode === "on" ? "，浏览器渲染抓取较慢，可能需要 2–8 分钟"
+    : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜（最长几分钟）"
+    : depth > 1 ? "，深度抓取可能需要 1–2 分钟" : "，通常需要 10–40 秒";
+  out.innerHTML = `<div class="status"><span class="spinner"></span>正在按深度 ${depth} 层抓取页面并搜索${hint}…</div>`;
+  try {
+    const resp = await fetch("/api/search", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({startUrl, keywords, depth, render: renderMode})
+    });
+    const data = await resp.json();
+    if (!resp.ok) { showError(data.detail || "搜索失败"); return; }
+    render(data);
+  } catch (e) {
+    showError("无法连接搜索服务：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function render(data) {
+  searchId = data.searchId || null;
+  aiSection.hidden = !searchId;
+  const el = document.getElementById("expandLine");
+  if (data.expandedKeywords && data.expandedKeywords.length) {
+    el.hidden = false;
+    el.textContent = "AI 扩展：" +
+      data.expandedKeywords.map(k => `+${k}`).join("、");
+  } else {
+    el.hidden = true;
+  }
+  let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（深度 ${data.depth} 层${data.render ? "，JS 渲染" : ""}${
+    data.siteSearch && data.siteSearch.pagesFetched > 0
+      ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），命中 ${data.totalHits} 处。${
+    data.autoNote ? `<br>${escapeHtml(data.autoNote)}` : ""}</p>`;
+  if (data.totalHits === 0) {
+    const kw = data.keywords.map(k => `「${escapeHtml(k)}」`).join("、");
+    html += `<div class="empty"><h2>关键词 ${kw} 在已成功抓取的 ${data.pagesCrawled} 个页面中均未出现</h2>
+      <div>已抓取的页面：</div><ul>` +
+      data.crawledPages.map(u =>
+        `<li><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></li>`
+      ).join("") + `</ul></div>`;
+  } else {
+    for (const page of data.results) {
+      html += `<div class="card"><h2><a href="${escapeHtml(page.pageUrl)}" target="_blank" rel="noopener">${
+        escapeHtml(page.pageTitle || page.pageUrl)}</a>
+        <span class="linkref">${escapeHtml(page.pageUrl)}</span></h2>`;
+      for (const hit of page.hits) {
+        const locateOnPage = (hit.kind === "link-text" || hit.kind === "text")
+          ? `<a class="jump" title="打开高亮处理过的页面副本，醒目显示关键词位置" href="/api/locate?url=${encodeURIComponent(page.pageUrl)}&keyword=${encodeURIComponent(hit.keyword)}" target="_blank" rel="noopener">所在页定位</a>`
+          : "";
+        const jumpTitle = hit.linkHref ? "打开链接指向的目标页" : "打开关键词所在页面";
+        html += `<div class="hit"><span class="badge">${KIND_LABELS[hit.kind] || hit.kind}</span>
+          <span class="snippet">${highlight(hit.snippet, data.keywords)}${
+          hit.linkHref ? `<br><span class="linkref">链接：<a href="${escapeHtml(hit.linkHref)}" target="_blank" rel="noopener">${escapeHtml(hit.linkHref)}</a></span>` : ""
+        }</span><span class="actions"><a class="jump" title="${jumpTitle}" href="${escapeHtml(hit.href)}" target="_blank" rel="noopener">跳转定位</a>${locateOnPage}</span></div>`;
+      }
+      html += `</div>`;
+    }
+  }
+  if (data.pagesFailed.length) {
+    html += `<details><summary>${data.pagesFailed.length} 个页面抓取失败（不影响结果）</summary><ul>` +
+      data.pagesFailed.map(f =>
+        `<li>${escapeHtml(f.url)} — ${escapeHtml(f.reason)}</li>`).join("") +
+      `</ul></details>`;
+  }
+  out.innerHTML = html;
+}
+
+btn.addEventListener("click", run);
+document.getElementById("kw").addEventListener("keydown", e => {
+  if (e.key === "Enter") run();
+});
+
+document.getElementById("sumBtn").addEventListener("click", async (e) => {
+  if (!searchId) return;
+  const btn = e.target, outEl = document.getElementById("sumOut"),
+        errEl = document.getElementById("sumErr");
+  btn.disabled = true; errEl.textContent = "";
+  let text = "";
+  renderStreamText(outEl, "", true);
+  try {
+    await streamSSE("/api/summarize", {searchId}, (d) => {
+      text += d; renderStreamText(outEl, text, true);
+    });
+    renderStreamText(outEl, text, false);
+  } catch (err) {
+    renderStreamText(outEl, text, false);
+    errEl.textContent = "AI 摘要失败：" + err.message;
+  } finally { btn.disabled = false; }
+});
+
+async function ask() {
+  const input = document.getElementById("qaInput");
+  const q = input.value.trim();
+  if (!q || !searchId) return;
+  input.value = "";
+  const btn = document.getElementById("askBtn");
+  btn.disabled = true;
+  const list = document.getElementById("qaList");
+  const item = document.createElement("div");
+  item.className = "qa-item";
+  item.innerHTML = `<div class="qa-q">问：${escapeHtml(q)}</div><div class="ai-out"></div>`;
+  list.appendChild(item);
+  const outEl = item.querySelector(".ai-out");
+  let text = "";
+  renderStreamText(outEl, "", true);
+  try {
+    await streamSSE("/api/ask", {searchId, question: q}, (d) => {
+      text += d; renderStreamText(outEl, text, true);
+    });
+    renderStreamText(outEl, text, false);
+  } catch (err) {
+    renderStreamText(outEl, text, false);
+    outEl.innerHTML += `<div class="ai-error">AI 回答失败：${escapeHtml(err.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+document.getElementById("askBtn").addEventListener("click", ask);
+document.getElementById("qaInput").addEventListener("keydown", e => {
+  if (e.key === "Enter") ask();
+});
+
+// ---------- 定时搜索任务 ----------
+const jobKindSel = document.getElementById("jobKind");
+const jobTimeInput = document.getElementById("jobTime");
+const jobHoursInput = document.getElementById("jobHours");
+
+jobKindSel.addEventListener("change", () => {
+  const daily = jobKindSel.value === "daily";
+  jobTimeInput.hidden = !daily;
+  jobHoursInput.hidden = daily;
+});
+
+document.getElementById("jobFill").addEventListener("click", () => {
+  document.getElementById("jobUrl").value = document.getElementById("url").value;
+  document.getElementById("jobKw").value = document.getElementById("kw").value;
+  document.getElementById("jobDepth").value = document.getElementById("depth").value;
+  document.getElementById("jobRender").value = document.getElementById("render").value;
+});
+
+function jobErr(msg) { document.getElementById("jobErr").textContent = msg || ""; }
+
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleString("zh-CN", {hour12: false});
+}
+
+async function loadJobs() {
+  const list = document.getElementById("jobList");
+  try {
+    const resp = await fetch("/api/jobs");
+    const data = await resp.json();
+    if (!resp.ok) { list.innerHTML = `<div class="job-error">${escapeHtml(data.detail || "加载失败")}</div>`; return; }
+    if (!data.jobs.length) {
+      list.innerHTML = `<div class="job-empty">还没有定时任务。填好上方表单，或先搜索一次再点「填入当前搜索条件」，即可创建。</div>`;
+      return;
+    }
+    list.innerHTML = data.jobs.map(j => {
+      const title = j.name || `${j.startUrl} · ${j.keywords.join(" ")}`;
+      let resultLine = "";
+      if (j.running) {
+        resultLine = `<div class="job-result">运行中…</div>`;
+      } else if (j.lastError) {
+        resultLine = `<div class="job-error">上次运行失败：${escapeHtml(j.lastError)}</div>`;
+      } else if (j.lastResult) {
+        const r = j.lastResult;
+        let badge = "";
+        if (r.newHits === null || r.newHits === undefined) {
+          badge = `<span class="base-badge">基线</span>`;
+        } else if (r.newHits > 0) {
+          badge = `<span class="new-badge">+${r.newHits} 新命中</span>`;
+        }
+        resultLine = `<div class="job-result">上次运行 ${fmtTime(r.ranAt)}：抓取 ${r.pagesCrawled} 页，命中 ${r.totalHits} 处${r.renderUsed ? "（JS 渲染）" : ""}${badge}</div>`;
+      } else {
+        resultLine = `<div class="job-result">尚未运行</div>`;
+      }
+      return `<div class="job-row">
+        <div class="job-head">
+          <label class="switch" title="启用/停用">
+            <input type="checkbox" data-act="toggle" data-id="${j.id}" ${j.enabled ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span class="job-name">${escapeHtml(title)}</span>
+          <span class="job-sched">${escapeHtml(j.scheduleText)}${j.enabled ? " · 下次 " + fmtTime(j.nextRun) : "（已停用）"}</span>
+        </div>
+        <div class="job-meta">${escapeHtml(j.startUrl)} · 关键词：${j.keywords.map(k => escapeHtml(k)).join("、")} · 深度 ${j.depth} 层${j.render !== "auto" ? " · " + (j.render === "on" ? "强制渲染" : "仅静态") : ""}</div>
+        ${resultLine}
+        <div class="job-ops">
+          <button data-act="run" data-id="${j.id}">立即运行</button>
+          <button data-act="del" data-id="${j.id}" class="danger">删除</button>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    list.innerHTML = `<div class="job-error">无法连接服务：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+document.getElementById("jobList").addEventListener("click", async (e) => {
+  const t = e.target.closest("[data-act]");
+  if (!t) return;
+  const id = t.dataset.id, act = t.dataset.act;
+  if (act === "del" && !confirm("确定删除这个定时任务？")) return;
+  const url = act === "run" ? `/api/jobs/${id}/run`
+            : act === "del" ? `/api/jobs/${id}` : null;
+  if (!url) return;
+  t.disabled = true;
+  try {
+    await fetch(url, {method: act === "del" ? "DELETE" : "POST"});
+    setTimeout(loadJobs, act === "run" ? 2000 : 0);
+    if (act === "del") await loadJobs();
+  } catch (err) { jobErr("操作失败：" + err.message); }
+});
+document.getElementById("jobList").addEventListener("change", async (e) => {
+  const t = e.target.closest('input[data-act="toggle"]');
+  if (!t) return;
+  try {
+    await fetch(`/api/jobs/${t.dataset.id}/toggle`, {method: "POST"});
+    await loadJobs();
+  } catch (err) { jobErr("切换失败：" + err.message); }
+});
+
+document.getElementById("jobCreate").addEventListener("click", async (e) => {
+  jobErr("");
+  const startUrl = document.getElementById("jobUrl").value.trim();
+  const keywords = document.getElementById("jobKw").value.trim().split(/\s+/).filter(Boolean);
+  if (!/^https?:\/\/.+/.test(startUrl)) { jobErr("请输入合法的起始网址"); return; }
+  if (!keywords.length) { jobErr("请输入至少一个关键词"); return; }
+  const daily = jobKindSel.value === "daily";
+  const schedule = daily
+    ? {kind: "daily", time: jobTimeInput.value || "09:30"}
+    : {kind: "interval", hours: parseInt(jobHoursInput.value, 10) || 6};
+  const btnEl = e.target;
+  btnEl.disabled = true;
+  try {
+    const resp = await fetch("/api/jobs", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        name: document.getElementById("jobName").value.trim(),
+        startUrl, keywords,
+        depth: parseInt(document.getElementById("jobDepth").value, 10),
+        render: document.getElementById("jobRender").value,
+        schedule
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { jobErr(data.detail || "创建失败"); return; }
+    document.getElementById("jobName").value = "";
+    await loadJobs();
+  } catch (err) {
+    jobErr("创建失败：" + err.message);
+  } finally { btnEl.disabled = false; }
+});
+
+loadJobs();
+setInterval(loadJobs, 30000);
+</script>
+</body>
+</html>

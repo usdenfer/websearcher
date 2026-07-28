@@ -1,0 +1,64 @@
+"""renderer 测试：真实 Chromium 渲染 JS 页面与翻页抓取。
+
+需要项目 .venv 安装 playwright 且 Chromium 可用；不满足则跳过。
+"""
+import asyncio
+
+import pytest
+
+pytest.importorskip("playwright")
+
+from renderer import RenderError, render_page  # noqa: E402
+
+
+def _chromium_ok() -> bool:
+    async def try_launch():
+        from playwright.async_api import async_playwright
+        try:
+            async with async_playwright() as p:
+                b = await p.chromium.launch(headless=True)
+                await b.close()
+            return True
+        except Exception:
+            return False
+    try:
+        return asyncio.run(try_launch())
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _chromium_ok(),
+                                reason="Chromium 不可用")
+
+
+def test_render_executes_js(site_server):
+    html, links = asyncio.run(render_page(f"{site_server}/dynamic.html"))
+    assert "JS注入的正文内容标记" in html
+    assert any(u.endswith("/sub1.html") for u in links)
+
+
+def test_render_pagination_collects_links(site_server):
+    html, links = asyncio.run(render_page(f"{site_server}/pager.html"))
+    # 第一页和翻页后第二页的文章链接都应收集到
+    assert any(u.endswith("/sub1.html") for u in links)
+    assert any(u.endswith("/sub2.html") for u in links)
+    # 每个翻页状态的 HTML 都拼入最终结果（中途内容不被覆盖丢失）
+    assert "第一批文章" in html
+    assert "第二批文章" in html
+
+
+def test_render_numbered_pagination(site_server):
+    html, links = asyncio.run(render_page(f"{site_server}/pager2.html"))
+    # 数字页码分页：1→2→3 逐页点击，三页文章链接全部收集
+    assert any(u.endswith("/sub1.html") for u in links)
+    assert any(u.endswith("/sub2.html") for u in links)
+    assert any(u.endswith("/deep.html") for u in links)
+    assert "第三页文章" in html
+    # 栏目菜单（.pager 里 active 的兄弟链接）不能被当作翻页点击：
+    # 否则页面会导航到 dynamic.html，其 JS 注入内容会混入结果
+    assert "JS注入的正文内容标记" not in html
+
+
+def test_render_bad_url_raises():
+    with pytest.raises(RenderError):
+        asyncio.run(render_page("http://127.0.0.1:1/nope.html"))

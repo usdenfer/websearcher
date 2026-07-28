@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+<div id="list"></div>
+<script>
+setTimeout(function () {
+  var a = document.createElement("a");
+  a.href = "sub1.html";
+  a.textContent = "动态注入的文章";
+  document.getElementById("list").appendChild(a);
+  var p = document.createElement("p");
+  p.textContent = "JS注入的正文内容标记";
+  document.body.appendChild(p);
+}, 300);
+</script>
+</body>
+</html>

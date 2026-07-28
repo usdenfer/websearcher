@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+<ul class="pager">
+  <li class="active"><a href="pager2.html">本栏目</a></li>
+  <li><a href="dynamic.html">其他栏目</a></li>
+</ul>
+<ul id="arts"><li><a href="sub1.html">第一页文章</a></li></ul>
+<ul class="pagination">
+  <li class="active"><a href="javascript:;">1</a></li>
+  <li><a href="javascript:go(2)">2</a></li>
+  <li><a href="javascript:go(3)">3</a></li>
+</ul>
+<script>
+function go(n) {
+  var links = {2: '<li><a href="sub2.html">第二页文章</a></li>',
+               3: '<li><a href="deep.html">第三页文章</a></li>'};
+  document.getElementById("arts").innerHTML = links[n];
+  var lis = document.querySelectorAll(".pagination li");
+  lis.forEach(function (li, i) {
+    li.className = (i === n - 1) ? "active" : "";
+  });
+}
+</script>
+</body>
+</html>
