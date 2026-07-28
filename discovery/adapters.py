@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 from discovery.models import DomainPolicy, SearchSpec
+
+HOST_LABEL_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 
 
 def _safe_urlsplit(url: str) -> SplitResult | None:
@@ -16,19 +22,50 @@ def _safe_urlsplit(url: str) -> SplitResult | None:
     return parts
 
 
-def _origin(start_url: str) -> str:
+def _safe_http_authority(
+    start_url: str,
+) -> tuple[str, str, int | None] | None:
     parts = _safe_urlsplit(start_url)
-    if parts is None or not parts.scheme or not parts.netloc:
-        return ""
-    return f"{parts.scheme.lower()}://{parts.netloc}"
+    if (
+        parts is None
+        or parts.scheme.lower() not in {"http", "https"}
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return None
+    host = parts.hostname.lower().rstrip(".")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return None
+        labels = host.split(".")
+        if not labels or any(
+            not HOST_LABEL_RE.fullmatch(label) for label in labels
+        ):
+            return None
+    return parts.scheme.lower(), host, parts.port
+
+
+def _origin(start_url: str) -> str:
+    authority = _safe_http_authority(start_url)
+    if authority is None:
+        raise ValueError("适配器起始地址必须是有效的 HTTP(S) URL")
+    scheme, host, port = authority
+    formatted_host = f"[{host}]" if ":" in host else host
+    port_suffix = f":{port}" if port is not None else ""
+    return f"{scheme}://{formatted_host}{port_suffix}"
 
 
 class SiteAdapter:
     profile = "generic"
 
     def domain_policy(self, start_url: str) -> DomainPolicy:
-        parts = _safe_urlsplit(start_url)
-        host = (parts.hostname or "").lower().rstrip(".") if parts else ""
+        authority = _safe_http_authority(start_url)
+        host = authority[1] if authority else ""
         allowed_hosts = frozenset({host}) if host else frozenset()
         return DomainPolicy(host, allowed_hosts)
 
@@ -82,7 +119,12 @@ class FreeCmsAdapter(SiteAdapter):
             )
         payload = response.get("data")
         rows = payload.get("rows") if isinstance(payload, dict) else payload
-        return True, list(rows) if isinstance(rows, list) else [], ""
+        if (
+            not isinstance(rows, list)
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            return False, [], "FreeCMS 搜索接口数据结构无效"
+        return True, list(rows), ""
 
 
 class YunnanCmsAdapter(SiteAdapter):

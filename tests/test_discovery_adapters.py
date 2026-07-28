@@ -60,6 +60,49 @@ def test_generic_domain_policy_contains_only_safely_parsed_root_host():
     assert policy.allow_related_hosts is False
 
 
+@pytest.mark.parametrize(
+    ("adapter_type", "start_url", "expected_origin"),
+    [
+        (FreeCmsAdapter, "http://EXAMPLE.test/path", "http://example.test"),
+        (
+            FreeCmsAdapter,
+            "https://EXAMPLE.test:8443/path",
+            "https://example.test:8443",
+        ),
+        (
+            YunnanCmsAdapter,
+            "https://[2001:DB8::1]:9443/path",
+            "https://[2001:db8::1]:9443",
+        ),
+    ],
+)
+def test_specialized_adapter_origin_is_rebuilt_from_safe_authority(
+    adapter_type,
+    start_url,
+    expected_origin,
+):
+    assert adapter_type(start_url).origin == expected_origin
+
+
+@pytest.mark.parametrize(
+    "start_url",
+    [
+        "file://example.test/content",
+        "https://user:pass@example.test/",
+        "https://example.test:invalid/",
+        "https://[::1",
+        "https:///missing-host",
+    ],
+)
+@pytest.mark.parametrize("adapter_type", [FreeCmsAdapter, YunnanCmsAdapter])
+def test_specialized_adapters_reject_unsafe_or_invalid_origins(
+    adapter_type,
+    start_url,
+):
+    with pytest.raises(ValueError, match="有效的 HTTP"):
+        adapter_type(start_url)
+
+
 @pytest.mark.parametrize("start_url", ["", "not a url", "https://[::1"])
 def test_adapter_selection_and_policy_tolerate_invalid_start_urls(start_url):
     adapter = select_adapter(start_url, "")
@@ -125,6 +168,34 @@ def test_freecms_api_response_accepts_dict_rows_and_list_payload():
     assert adapter.parse_api_response(
         '{"code": "200", "data": [{"pageUrl": "/notice/2"}]}'
     ) == (True, [{"pageUrl": "/notice/2"}], "")
+    assert adapter.parse_api_response(
+        '{"code": 0, "data": []}'
+    ) == (True, [], "")
+    assert adapter.parse_api_response(
+        '{"code": 200, "data": {"rows": []}}'
+    ) == (True, [], "")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"code": 0}',
+        '{"code": 0, "data": null}',
+        '{"code": 0, "data": "unexpected"}',
+        '{"code": 0, "data": {"rows": null}}',
+        '{"code": 0, "data": {"rows": {"pageUrl": "/notice/1"}}}',
+        '{"code": 0, "data": [1]}',
+        '{"code": 0, "data": [{"pageUrl": "/notice/1"}, "bad-row"]}',
+    ],
+)
+def test_freecms_success_code_rejects_malformed_payloads(body):
+    ok, rows, warning = FreeCmsAdapter(
+        "https://www.zycg.gov.cn/"
+    ).parse_api_response(body)
+
+    assert ok is False
+    assert rows == []
+    assert "数据结构无效" in warning
 
 
 def test_freecms_business_failure_is_not_empty_success_and_preserves_message():
@@ -173,3 +244,27 @@ def test_yunnan_adapter_is_selected_by_searchn_marker():
     )
 
     assert isinstance(adapter, YunnanCmsAdapter)
+
+
+@pytest.mark.parametrize(
+    ("start_url", "homepage"),
+    [
+        (
+            "https://www.zycg.gov.cn/",
+            '<script src="/searchN.aspx"></script>',
+        ),
+        (
+            "https://cms.example.test/",
+            '<script src="/searchN.aspx"></script>'
+            '<script>fetch("/searchAll.do")</script>',
+        ),
+    ],
+)
+def test_freecms_detection_has_priority_over_yunnan_markers(
+    start_url,
+    homepage,
+):
+    assert isinstance(
+        select_adapter(start_url, homepage),
+        FreeCmsAdapter,
+    )
