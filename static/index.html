@@ -231,6 +231,30 @@ function escapeHtml(s) {
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[c]));
 }
+function formatDiscoveryWarning(value) {
+  if (typeof value !== "string") return "";
+  const match = value.trim().match(
+    /^([a-z][a-z0-9-]{0,31}):\s+(.+)$/i);
+  if (!match || /^https?$/i.test(match[1])) {
+    return "discovery: 处理失败";
+  }
+
+  const channel = match[1];
+  const reason = match[2].trim();
+  if (/^(?:RequestError|HTTPStatusError|ValueError|RuntimeError|ConnectError|TimeoutException)$/i.test(reason)) {
+    return `${channel}: ${reason}`;
+  }
+  if (/非\s*HTML/i.test(reason)) return `${channel}: 非 HTML 内容`;
+  if (/业务.*失败|business rejected/i.test(reason)) {
+    return `${channel}: 业务失败`;
+  }
+  if (/无效.*JSON|invalid JSON/i.test(reason)) {
+    return `${channel}: 无效 JSON`;
+  }
+  if (/超时|timeout/i.test(reason)) return `${channel}: 请求超时`;
+  if (/预算|budget/i.test(reason)) return `${channel}: 已达到预算`;
+  return `${channel}: 处理失败`;
+}
 function highlight(snippet, keywords) {
   let html = escapeHtml(snippet);
   for (const kw of keywords) {
@@ -288,7 +312,16 @@ function render(data) {
     el.hidden = true;
   }
   const discovery = data.discovery || {};
-  const sources = (discovery.sourcesSucceeded || []).join("、");
+  const sourceValues = Array.isArray(discovery.sourcesSucceeded)
+    ? discovery.sourcesSucceeded : [];
+  const sources = sourceValues
+    .filter(source => typeof source === "string")
+    .join("、");
+  const warningValues = Array.isArray(discovery.warnings)
+    ? discovery.warnings : [];
+  const formattedWarnings = [...new Set(
+    warningValues.map(formatDiscoveryWarning).filter(Boolean)
+  )].slice(0, 5);
   let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（深度 ${data.depth} 层${data.render ? "，JS 渲染" : ""}${
     data.siteSearch && data.siteSearch.pagesFetched > 0
       ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），命中 ${data.totalHits} 处。${
@@ -328,10 +361,10 @@ function render(data) {
         `<li>${escapeHtml(f.url)} — ${escapeHtml(f.reason)}</li>`).join("") +
       `</ul></details>`;
   }
-  if ((discovery.warnings || []).length) {
+  if (formattedWarnings.length) {
     html += `<details><summary>发现通道提示</summary><ul>` +
-      discovery.warnings.map(warning =>
-        `<li>${escapeHtml(warning)}</li>`).join("") +
+      formattedWarnings.map(formattedWarning =>
+        `<li>${escapeHtml(formattedWarning)}</li>`).join("") +
       `</ul></details>`;
   }
   out.innerHTML = html;

@@ -25,6 +25,7 @@ def test_frontend_renders_discovery_diagnostics():
     html = STATIC_INDEX.read_text(encoding="utf-8")
     assert "data.discovery" in html
     assert "sourcesSucceeded" in html
+    assert "Array.isArray(discovery.sourcesSucceeded)" in html
     assert "partial" in html
     assert "已达到搜索预算" in html
 
@@ -32,7 +33,11 @@ def test_frontend_renders_discovery_diagnostics():
 def test_frontend_escapes_discovery_warnings():
     html = STATIC_INDEX.read_text(encoding="utf-8")
     assert "discovery.warnings" in html
-    assert "escapeHtml(warning)" in html
+    assert "Array.isArray(discovery.warnings)" in html
+    assert "formatDiscoveryWarning" in html
+    assert "escapeHtml(formattedWarning)" in html
+    assert "escapeHtml(warning)" not in html
+    assert ".slice(0, 5)" in html
 
 
 def _chromium_ok() -> bool:
@@ -131,6 +136,35 @@ def test_search_and_ai_flow(app_server, site_server, monkeypatch):
         assert "问：这个页面讲了什么？" in qa_text
         assert "摘要" in qa_text
 
+        browser.close()
+
+
+def test_warning_formatter_hides_sensitive_details(app_server):
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(app_server + "/")
+
+        formatted = page.evaluate("""() => [
+          formatDiscoveryWarning(null),
+          formatDiscoveryWarning({secret: "object-secret"}),
+          formatDiscoveryWarning("feed: RuntimeError"),
+          formatDiscoveryWarning(
+            "https://user:password@example.test/path?token=secret: ConnectError"
+          ),
+          formatDiscoveryWarning("api: timeout token=secret")
+        ]""")
+
+        assert formatted == [
+            "",
+            "",
+            "feed: RuntimeError",
+            "discovery: 处理失败",
+            "api: 请求超时",
+        ]
+        assert "secret" not in " ".join(formatted)
+        assert "https://" not in " ".join(formatted)
         browser.close()
 
 
