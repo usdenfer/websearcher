@@ -117,6 +117,17 @@ def hit_keys(results: list[dict]) -> set[str]:
     return keys
 
 
+def _require_crawl_pages(crawl_result) -> None:
+    if crawl_result.pages:
+        return
+    reason = (
+        crawl_result.failed[0].get("reason", "未获取到起始页")
+        if crawl_result.failed
+        else "未获取到起始页"
+    )
+    raise RuntimeError(f"起始页无法访问：{reason}")
+
+
 class JobStore:
     def __init__(self, path: Path = JOBS_FILE):
         self.path = Path(path)
@@ -218,6 +229,7 @@ async def run_job(store: JobStore, job_id: str,
                     deadline=deadline,
                     budget=budget,
                 )
+                _require_crawl_pages(crawl_result)
                 render_used = True
             else:
                 crawl_result = await crawl_fn(
@@ -228,6 +240,7 @@ async def run_job(store: JobStore, job_id: str,
                     deadline=deadline,
                     budget=budget,
                 )
+                _require_crawl_pages(crawl_result)
                 if mode == "auto" and crawl_result.pages:
                     from matcher import (
                         looks_js_driven,

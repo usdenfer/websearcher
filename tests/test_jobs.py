@@ -234,6 +234,88 @@ def test_run_job_failure_records_error(tmp_path):
     assert "连接失败" in store.get("j1")["lastError"]
 
 
+@pytest.mark.parametrize("mode", ["on", "off", "auto"])
+def test_run_job_rejects_empty_initial_crawl_without_mutating_baseline(
+    tmp_path, mode,
+):
+    store = jobs.JobStore(tmp_path / "jobs.json")
+    previous_result = {
+        "ranAt": "2026-07-28T08:00:00",
+        "pagesCrawled": 2,
+        "totalHits": 3,
+    }
+    previous_keys = ["old-a", "old-b"]
+    store.add(_job(
+        {"kind": "daily", "time": "09:30"},
+        render=mode,
+        lastResult=previous_result,
+        prevKeys=previous_keys,
+    ))
+    discovery_called = False
+
+    async def empty_crawl(url, **kwargs):
+        return CrawlResult(
+            pages=[],
+            failed=[{"url": url, "reason": "搜索截止时间已到"}],
+        )
+
+    async def fake_expand(keywords, host):
+        return []
+
+    async def forbidden_discovery(*args, **kwargs):
+        nonlocal discovery_called
+        discovery_called = True
+        raise AssertionError("empty crawl must not enter discovery")
+
+    result = asyncio.run(jobs.run_job(
+        store,
+        "j1",
+        crawl_fn=empty_crawl,
+        expand_fn=fake_expand,
+        discovery_fn=forbidden_discovery,
+    ))
+
+    job = store.get("j1")
+    assert "error" in result
+    assert "搜索截止时间已到" in result["error"]
+    assert discovery_called is False
+    assert job["lastError"] == result["error"]
+    assert job["lastRunAt"] is not None
+    assert job["lastResult"] == previous_result
+    assert job["prevKeys"] == previous_keys
+
+
+def test_run_job_auto_keeps_static_when_render_attempt_is_empty(tmp_path):
+    store = jobs.JobStore(tmp_path / "jobs.json")
+    store.add(_job({"kind": "daily", "time": "09:30"}))
+    calls = []
+
+    async def fake_crawl(url, **kwargs):
+        calls.append(kwargs["render"])
+        if kwargs["render"]:
+            return CrawlResult(
+                pages=[],
+                failed=[{"url": url, "reason": "页面预算已用尽"}],
+            )
+        return _fake_pages("<html><body>静态页面无命中</body></html>")
+
+    async def fake_expand(keywords, host):
+        return []
+
+    result = asyncio.run(jobs.run_job(
+        store,
+        "j1",
+        crawl_fn=fake_crawl,
+        expand_fn=fake_expand,
+        discovery_fn=_noop_discovery,
+    ))
+
+    assert "error" not in result
+    assert calls == [False, True]
+    assert result["pagesCrawled"] == 1
+    assert result["renderUsed"] is False
+
+
 def test_run_job_auto_escalates(tmp_path):
     store = jobs.JobStore(tmp_path / "jobs.json")
     store.add(_job({"kind": "daily", "time": "09:30"}))
