@@ -176,8 +176,12 @@ def parse_result_candidates(
     containers = soup.select(
         "article, main li, .result, .search-result, .titlist li"
     )
-    anchors = [container.find("a", href=True) for container in containers]
-    if not any(anchors):
+    anchors = [
+        anchor
+        for container in containers
+        for anchor in container.find_all("a", href=True)
+    ]
+    if not anchors:
         anchors = soup.find_all("a", href=True)
 
     result: list[Candidate] = []
@@ -270,19 +274,30 @@ def parse_feed(xml: str, policy: DomainPolicy) -> list[Candidate]:
     result: list[Candidate] = []
     seen: set[str] = set()
     for item in root.iter():
-        if _local_name(item.tag) not in {"item", "entry"}:
+        item_type = _local_name(item.tag)
+        if item_type not in {"item", "entry"}:
             continue
-        link = next(
-            (
-                child
-                for child in item
-                if _local_name(child.tag) == "link"
-            ),
-            None,
-        )
         raw_url = ""
-        if link is not None:
-            raw_url = str(link.get("href") or (link.text or "").strip())
+        links = [
+            child
+            for child in item
+            if _local_name(child.tag) == "link"
+        ]
+        if item_type == "entry":
+            link = next(
+                (
+                    node
+                    for node in links
+                    if node.get("href")
+                    and str(node.get("rel") or "alternate").lower()
+                    == "alternate"
+                ),
+                None,
+            )
+            if link is not None:
+                raw_url = str(link.get("href"))
+        elif links:
+            raw_url = str(links[0].text or "").strip()
         url = normalize_candidate_url(raw_url)
         if (
             not url

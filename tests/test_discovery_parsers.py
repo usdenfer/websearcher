@@ -108,6 +108,25 @@ def test_result_parser_falls_back_to_all_anchors_without_result_containers():
     ]
 
 
+def test_result_parser_checks_every_anchor_inside_a_result_container():
+    html = """<article>
+      <a href="https://outside.test/logo.png">站外图片</a>
+      <a href="/article/inside.html">有效正文</a>
+    </article>"""
+
+    candidates = parse_result_candidates(
+        html,
+        "https://example.test/",
+        POLICY,
+        source="category",
+        keyword="正文",
+    )
+
+    assert [(item.url, item.title_hint) for item in candidates] == [
+        ("https://example.test/article/inside.html", "有效正文")
+    ]
+
+
 def test_parses_sitemap_feed_and_sitemap_index():
     assert parse_sitemap(fixture("sitemap.xml"), POLICY) == [
         "https://example.test/news/1.html",
@@ -132,7 +151,8 @@ def test_parses_atom_link_href_and_skips_malformed_urls():
     atom = """<feed xmlns="http://www.w3.org/2005/Atom">
       <entry>
         <title>Atom 条目</title>
-        <link href="https://example.test/news/atom.html"/>
+        <link rel="self" href="https://example.test/feed/entry.xml"/>
+        <link rel="alternate" href="https://example.test/news/atom.html"/>
       </entry>
       <entry><title>坏链接</title><link href="http://[invalid"/></entry>
     </feed>"""
