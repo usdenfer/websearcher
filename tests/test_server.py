@@ -58,6 +58,39 @@ def test_search_hit_structure(site_server):
     assert "#:~:text=" in text_hit["href"]
 
 
+def test_search_follows_redirect_and_finds_relative_article_body(
+        monkeypatch, redirect_site):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def no_discovery(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="generic"),
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "discover_pages", no_discovery)
+    response = client.post("/api/search", json={
+        "startUrl": redirect_site["start"],
+        "keywords": [redirect_site["keyword"]],
+        "depth": 1,
+        "render": "off",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["crawledPages"][:2] == [
+        redirect_site["home"],
+        redirect_site["article"],
+    ]
+    assert any(
+        item["pageUrl"] == redirect_site["article"]
+        for item in data["results"]
+    )
+
+
 def test_search_response_contains_discovery_diagnostics(site_server):
     resp = client.post("/api/search", json={
         "startUrl": f"{site_server}/index.html",

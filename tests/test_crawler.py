@@ -63,6 +63,31 @@ def test_crawl_collects_pages_and_failures(site_server):
         {"url": f"{site_server}/missing.html", "reason": "HTTP 404"}]
 
 
+def test_crawl_preserves_redirected_home_and_resolves_relative_links(
+        redirect_site):
+    result = asyncio.run(crawl(redirect_site["start"], depth=1))
+
+    assert [page.url for page in result.pages] == [
+        redirect_site["home"],
+        redirect_site["article"],
+    ]
+    assert redirect_site["keyword"] in result.pages[1].html
+
+
+def test_crawl_rejects_subpage_redirect_outside_effective_root(
+        redirect_site):
+    result = asyncio.run(crawl(redirect_site["start"], depth=1))
+
+    assert [page.url for page in result.pages] == [
+        redirect_site["home"],
+        redirect_site["article"],
+    ]
+    assert result.failed == [{
+        "url": redirect_site["escape"],
+        "reason": "重定向到站外地址",
+    }]
+
+
 def test_crawl_start_page_failure_raises(site_server):
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(crawl(f"{site_server}/missing.html"))

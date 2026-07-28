@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import pytest
 
-from crawler import CrawledPage, CrawlResult
+from crawler import CrawledPage, CrawlResult, crawl
 from discovery.engine import (
     DiscoveryRun,
     discover_pages,
@@ -436,6 +437,34 @@ def test_redirected_homepage_url_drives_all_site_discovery(monkeypatch):
     )
     assert fetchers[0].urls == [fresh.url]
     assert [page.url for page in result.pages] == [fresh.url]
+    assert context.exited is True
+
+
+def test_real_crawl_redirect_drives_discovery_origin_and_policy(
+        monkeypatch, redirect_site):
+    base_result = _run(crawl(redirect_site["start"], depth=1))
+    context, provider_records, _fetchers = _install_engine_fakes(monkeypatch)
+
+    _run(
+        discover_pages(
+            redirect_site["start"],
+            ["alpha"],
+            base_result,
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    effective_host = urlsplit(redirect_site["home"]).hostname
+    effective_origin = redirect_site["home"].removesuffix("/home/")
+    by_source = {source: provider for source, provider, _ in provider_records}
+    assert by_source["sitemap"].args == (effective_origin,)
+    assert all(
+        policy.root_host == effective_host
+        and policy.allows(effective_host)
+        and not policy.allows("localhost")
+        for _source, _provider, policy in provider_records
+    )
     assert context.exited is True
 
 

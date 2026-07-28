@@ -37,6 +37,12 @@ class CrawledPage:
     html: str
 
 
+@dataclass(frozen=True)
+class FetchedHtml:
+    html: str
+    final_url: str
+
+
 @dataclass
 class CrawlResult:
     pages: list[CrawledPage] = field(default_factory=list)
@@ -136,13 +142,21 @@ def describe_error(exc: Exception) -> str:
     return type(exc).__name__
 
 
-async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
+async def fetch_html_response(
+    client: httpx.AsyncClient,
+    url: str,
+) -> FetchedHtml:
     response = await client.get(url)
     response.raise_for_status()
     content_type = response.headers.get("content-type", "")
     if "html" not in content_type.lower():
         raise ValueError(f"非 HTML 内容 ({content_type or '未知类型'})")
-    return response.text
+    return FetchedHtml(response.text, str(response.url))
+
+
+async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
+    """Fetch HTML while preserving the historical string return contract."""
+    return (await fetch_html_response(client, url)).html
 
 
 RETRYABLE_TRANSPORT = (httpx.ConnectError, httpx.RemoteProtocolError,
@@ -152,7 +166,9 @@ RETRYABLE_TRANSPORT = (httpx.ConnectError, httpx.RemoteProtocolError,
 
 async def fetch_html_retry(client: httpx.AsyncClient, url: str,
                            attempts: int = 4,
-                           base_delay: float = 1.5) -> str:
+                           base_delay: float = 1.5,
+                           include_final_url: bool = False,
+                           ) -> str | FetchedHtml:
     """带重试的页面抓取：政府站 WAF 常间歇性拒连/掐断响应/偶发 5xx，
     瞬时失败用指数退避重试（1.5s/3s/6s），非瞬时错误（4xx、非 HTML）
     不重试直接抛出。"""
@@ -160,6 +176,8 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
+            if include_final_url:
+                return await fetch_html_response(client, url)
             return await fetch_html(client, url)
         except RETRYABLE_TRANSPORT as exc:
             last_exc = exc
@@ -171,6 +189,16 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
             await asyncio.sleep(delay)
             delay *= 2
     raise last_exc  # type: ignore[misc]
+
+
+def _as_fetched_html(
+    value: str | FetchedHtml,
+    requested_url: str,
+) -> FetchedHtml:
+    """Accept old string-returning test doubles without changing public APIs."""
+    if isinstance(value, FetchedHtml):
+        return value
+    return FetchedHtml(value, requested_url)
 
 
 async def gather_before_deadline(coroutines, deadline: float | None):
@@ -258,8 +286,8 @@ async def crawl(start_url: str, depth: int = 1,
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT},
     ) as client:
-        start_html, deadline_reached = await await_before_deadline(
-            fetch_html_retry(client, start_url),
+        start_value, deadline_reached = await await_before_deadline(
+            fetch_html_retry(client, start_url, include_final_url=True),
             deadline,
         )
         if deadline_reached:
@@ -268,22 +296,46 @@ async def crawl(start_url: str, depth: int = 1,
                 "reason": "搜索截止时间已到",
             })
             return result
-        start_page = CrawledPage(url=start_url, html=start_html)
+        start_fetched = _as_fetched_html(start_value, start_url)
+        start_page = CrawledPage(
+            url=start_fetched.final_url,
+            html=start_fetched.html,
+        )
         result.pages.append(start_page)
-        visited = {normalize_url(start_url)}
+        effective_netloc = urlsplit(start_page.url).netloc.lower()
+        visited = {
+            normalize_url(start_url),
+            normalize_url(start_page.url),
+        }
+        stored_pages = {normalize_url(start_page.url)}
         current_level = [start_page]
         semaphore = asyncio.Semaphore(CONCURRENCY)
 
         async def fetch_one(url: str) -> CrawledPage | None:
             async with semaphore:
                 try:
-                    html = await fetch_html_retry(
-                        client, url, attempts=2, base_delay=1.0)
+                    value = await fetch_html_retry(
+                        client,
+                        url,
+                        attempts=2,
+                        base_delay=1.0,
+                        include_final_url=True,
+                    )
                 except Exception as exc:  # noqa: BLE001 - collected, not raised
                     result.failed.append(
                         {"url": url, "reason": describe_error(exc)})
                     return None
-                return CrawledPage(url=url, html=html)
+                fetched = _as_fetched_html(value, url)
+                if urlsplit(fetched.final_url).netloc.lower() != effective_netloc:
+                    result.failed.append({
+                        "url": url,
+                        "reason": "重定向到站外地址",
+                    })
+                    return None
+                return CrawledPage(
+                    url=fetched.final_url,
+                    html=fetched.html,
+                )
 
         for _level in range(depth):
             remaining = max_pages - len(result.pages)
@@ -302,7 +354,16 @@ async def crawl(start_url: str, depth: int = 1,
                 (fetch_one(u) for u in candidates),
                 deadline,
             )
-            current_level = [p for p in fetched if p is not None]
+            current_level = []
+            for page in fetched:
+                if page is None:
+                    continue
+                normalized = normalize_url(page.url)
+                if normalized in stored_pages:
+                    continue
+                stored_pages.add(normalized)
+                visited.add(normalized)
+                current_level.append(page)
             result.pages.extend(current_level)
             if deadline_reached:
                 break

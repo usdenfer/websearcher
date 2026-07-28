@@ -174,3 +174,90 @@ def discovery_site():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
+    """Redirect localhost to 127.0.0.1 and serve relative content there."""
+
+    keyword = "REDIRECT-BODY-6421"
+
+    def do_GET(self):
+        request = urlsplit(self.path)
+        port = self.server.server_address[1]
+
+        if request.path == "/start":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://127.0.0.1:{port}/home/",
+            )
+            self.end_headers()
+            return
+
+        if request.path == "/home/":
+            self._send_html("""
+                <html><head><title>Redirected home</title></head><body>
+                  <main>
+                    <a href="article">正文页</a>
+                    <a href="escape">站外重定向</a>
+                  </main>
+                </body></html>
+            """)
+            return
+
+        if request.path == "/home/article":
+            self._send_html(f"""
+                <html><head><title>Redirected article</title></head><body>
+                  <article><p>{self.keyword}</p></article>
+                </body></html>
+            """)
+            return
+
+        if request.path == "/home/escape":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://localhost:{port}/outside",
+            )
+            self.end_headers()
+            return
+
+        if request.path == "/outside":
+            self._send_html("<html><main>outside</main></html>")
+            return
+
+        self.send_error(404)
+
+    def _send_html(self, body: str) -> None:
+        payload = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format, *args):
+        del format, args
+
+
+@pytest.fixture(scope="session")
+def redirect_site():
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _RedirectSiteHandler
+    )
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        yield {
+            "start": f"http://localhost:{port}/start",
+            "home": f"http://127.0.0.1:{port}/home/",
+            "article": f"http://127.0.0.1:{port}/home/article",
+            "escape": f"http://127.0.0.1:{port}/home/escape",
+            "keyword": _RedirectSiteHandler.keyword,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
