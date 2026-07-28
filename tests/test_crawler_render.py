@@ -35,7 +35,8 @@ async def _fake_render(url):
     return RENDERED[url]
 
 
-async def _fake_render_result(url):
+async def _fake_render_result(url, navigation_allowed=None):
+    del navigation_allowed
     html, links = await _fake_render(url)
     return renderer.RenderedPage(html, links, url)
 
@@ -59,7 +60,8 @@ def test_render_crawl_uses_final_url_as_effective_root(monkeypatch):
     final_home = "https://www.example.test/home/"
     article = "https://www.example.test/home/article"
 
-    async def fake_result(url):
+    async def fake_result(url, navigation_allowed=None):
+        del navigation_allowed
         if url == BASE:
             return renderer.RenderedPage(
                 "<html><body>redirected</body></html>",
@@ -95,7 +97,8 @@ def test_render_crawl_depth1_only_first_level(monkeypatch):
 
 
 def test_render_crawl_collects_failures(monkeypatch):
-    async def flaky(url):
+    async def flaky(url, navigation_allowed=None):
+        del navigation_allowed
         if url.endswith("/nav"):
             raise renderer.RenderError("页面加载失败：boom")
         return await _fake_render_result(url)
@@ -173,7 +176,8 @@ def _dynamic_discovery_crawl(monkeypatch, *, target_on_start=False, depth=1):
                       hub_articles + [TARGET]),
     }
 
-    async def fake_render(url):
+    async def fake_render(url, navigation_allowed=None):
+        del navigation_allowed
         html, links = rendered.get(
             url, ("<html><body>普通页面</body></html>", [])
         )
@@ -218,7 +222,8 @@ def test_render_discovery_hub_remains_bfs_frontier_after_supplement(monkeypatch)
     }
     render_calls = []
 
-    async def fake_render(url):
+    async def fake_render(url, navigation_allowed=None):
+        del navigation_allowed
         render_calls.append(url)
         html, links = rendered[url]
         return renderer.RenderedPage(html, links, url)
@@ -240,7 +245,8 @@ def test_failed_static_discovery_article_falls_back_to_rendered_bfs(
         TARGET: ("<html><body>渲染兜底正文</body></html>", []),
     }
 
-    async def fake_render(url):
+    async def fake_render(url, navigation_allowed=None):
+        del navigation_allowed
         html, links = rendered[url]
         return renderer.RenderedPage(html, links, url)
 

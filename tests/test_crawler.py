@@ -37,6 +37,25 @@ def test_extract_same_site_links(site_server):
     ]  # 外部链接、二进制、mailto、起始页自身、重复项均被排除
 
 
+def test_extract_links_compares_canonical_authority():
+    html = """
+      <a href="http://EXAMPLE.test/a">implicit default</a>
+      <a href="http://example.test.:80/dot">trailing dot</a>
+      <a href="http://example.test:81/wrong-port">wrong port</a>
+      <a href="http://other.test/out">outside</a>
+    """
+
+    links = extract_same_site_links(
+        html,
+        "http://example.test:80/root/",
+    )
+
+    assert "http://example.test/a" in links
+    assert "http://example.test.:80/dot" in links
+    assert not any("wrong-port" in link for link in links)
+    assert not any("other.test" in link for link in links)
+
+
 def test_extract_respects_limit(site_server):
     html = "".join(f'<a href="/p{i}.html">p{i}</a>' for i in range(50))
     links = extract_same_site_links(html, f"{site_server}/index.html")
@@ -164,6 +183,28 @@ def test_crawl_accepts_exact_signature_fetch_double(monkeypatch):
     )
     result = asyncio.run(crawl("https://example.test/start", depth=0))
     assert result.pages[0].url == "https://www.example.test/home/"
+    assert calls == [("https://example.test/start", 4, 1.5)]
+
+
+def test_crawl_honors_public_exact_signature_fetch_patch(monkeypatch):
+    import crawler
+
+    calls = []
+
+    async def fake_fetch(client, url, attempts, base_delay):
+        calls.append((url, attempts, base_delay))
+        return "<html><main>patched</main></html>"
+
+    monkeypatch.setattr(crawler, "fetch_html_retry", fake_fetch)
+
+    result = asyncio.run(crawl("https://example.test/start", depth=0))
+
+    assert result.pages == [
+        crawler.CrawledPage(
+            "https://example.test/start",
+            "<html><main>patched</main></html>",
+        )
+    ]
     assert calls == [("https://example.test/start", 4, 1.5)]
 
 
@@ -342,7 +383,8 @@ def test_render_start_page_obeys_deadline_and_cancels(monkeypatch):
             raise
         return "<html><main>late</main></html>", []
 
-    async def slow_render_result(url):
+    async def slow_render_result(url, navigation_allowed=None):
+        del navigation_allowed
         html, links = await slow_render(url)
         return renderer.RenderedPage(html, links, url)
 

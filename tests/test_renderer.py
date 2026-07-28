@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 import renderer
+from discovery.urltools import same_site_boundary
 
 pytest.importorskip("playwright")
 
@@ -45,6 +46,38 @@ def test_render_result_exposes_redirect_final_url(redirect_site):
     )
     assert result.final_url == redirect_site["home"]
     assert "Redirected home" in result.html
+
+
+def test_render_navigation_policy_blocks_cross_host_before_request(
+        redirect_site):
+    redirect_site["handler"].render_outside_requests = 0
+    start_url = redirect_site["render_start"]
+
+    with pytest.raises(RenderError, match="站外"):
+        asyncio.run(renderer.render_page_result(
+            start_url,
+            navigation_allowed=lambda target: same_site_boundary(
+                start_url,
+                target,
+            ),
+        ))
+
+    assert redirect_site["handler"].render_outside_requests == 0
+
+
+def test_render_navigation_policy_allows_same_site_redirect(redirect_site):
+    start_url = redirect_site["start"]
+
+    result = asyncio.run(renderer.render_page_result(
+        start_url,
+        navigation_allowed=lambda target: same_site_boundary(
+            start_url,
+            target,
+        ),
+    ))
+
+    assert result.final_url == redirect_site["home"]
+    assert redirect_site["article"] in result.links
 
 
 def test_render_pagination_collects_links(site_server):

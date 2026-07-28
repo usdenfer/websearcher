@@ -181,6 +181,7 @@ class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
 
     keyword = "REDIRECT-BODY-6421"
     outside_requests = 0
+    render_outside_requests = 0
 
     def do_GET(self):
         request = urlsplit(self.path)
@@ -223,6 +224,20 @@ class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if request.path == "/render-start":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://localhost:{port}/render-outside",
+            )
+            self.end_headers()
+            return
+
+        if request.path == "/render-outside":
+            type(self).render_outside_requests += 1
+            self._send_html("<html><main>render outside</main></html>")
+            return
+
         if request.path == "/outside":
             type(self).outside_requests += 1
             self._send_html("<html><main>outside</main></html>")
@@ -259,6 +274,9 @@ def redirect_site():
             "escape": f"http://127.0.0.1:{port}/home/escape",
             "keyword": _RedirectSiteHandler.keyword,
             "handler": _RedirectSiteHandler,
+            "render_start": (
+                f"http://127.0.0.1:{port}/render-start"
+            ),
         }
     finally:
         server.shutdown()

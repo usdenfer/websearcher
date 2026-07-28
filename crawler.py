@@ -118,7 +118,7 @@ def extract_same_site_links(html: str, base_url: str,
     limit is applied, so stale navigation links cannot consume the quota
     ahead of unseen content links.
     """
-    base_host = urlsplit(base_url).netloc.lower()
+    base_authority = canonical_authority(base_url)
     base_norm = normalize_url(base_url)
     soup = BeautifulSoup(html, "html.parser")
     seen: set[str] = set()
@@ -128,7 +128,7 @@ def extract_same_site_links(html: str, base_url: str,
         parts = urlsplit(absolute)
         if parts.scheme not in ("http", "https"):
             continue
-        if parts.netloc.lower() != base_host:
+        if canonical_authority(absolute) != base_authority:
             continue
         normalized = normalize_url(absolute)
         if normalized == base_norm or is_binary_url(normalized):
@@ -266,6 +266,9 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
     raise last_exc  # type: ignore[misc]
 
 
+_ORIGINAL_FETCH_HTML_RETRY = fetch_html_retry
+
+
 def _as_fetched_html(
     value: str | FetchedHtml,
     requested_url: str,
@@ -274,6 +277,29 @@ def _as_fetched_html(
     if isinstance(value, FetchedHtml):
         return value
     return FetchedHtml(value, requested_url)
+
+
+async def _fetch_crawl_html(
+    context: _CrawlHttpContext,
+    url: str,
+    attempts: int,
+    base_delay: float,
+) -> FetchedHtml:
+    """Honor legacy public test patches; otherwise use the secure crawl path."""
+    if fetch_html_retry is not _ORIGINAL_FETCH_HTML_RETRY:
+        value = await fetch_html_retry(
+            context.client,
+            url,
+            attempts,
+            base_delay,
+        )
+        return _as_fetched_html(value, url)
+    return await _fetch_crawl_html_retry(
+        context,
+        url,
+        attempts,
+        base_delay,
+    )
 
 
 async def gather_before_deadline(coroutines, deadline: float | None):
@@ -366,7 +392,7 @@ async def crawl(start_url: str, depth: int = 1,
             lambda target: same_site_boundary(start_url, target),
         )
         start_value, deadline_reached = await await_before_deadline(
-            _fetch_crawl_html_retry(
+            _fetch_crawl_html(
                 start_context,
                 start_url,
                 4,
@@ -405,7 +431,7 @@ async def crawl(start_url: str, depth: int = 1,
         async def fetch_one(url: str) -> CrawledPage | None:
             async with semaphore:
                 try:
-                    value = await _fetch_crawl_html_retry(
+                    value = await _fetch_crawl_html(
                         child_context,
                         url,
                         2,
@@ -486,7 +512,13 @@ async def _crawl_render(start_url: str, depth: int,
 
     try:
         start_loaded, deadline_reached = await await_before_deadline(
-            renderer.render_page_result(start_url),
+            renderer.render_page_result(
+                start_url,
+                navigation_allowed=lambda target: same_site_boundary(
+                    start_url,
+                    target,
+                ),
+            ),
             deadline,
         )
     except renderer.RenderError as exc:
@@ -517,7 +549,12 @@ async def _crawl_render(start_url: str, depth: int,
 
     async def render_one(url: str):
         try:
-            rendered = await renderer.render_page_result(url)
+            rendered = await renderer.render_page_result(
+                url,
+                navigation_allowed=lambda target: (
+                    canonical_authority(target) == effective_authority
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - collected, not raised
             result.failed.append(
                 {"url": url, "reason": describe_error(exc)})
@@ -550,7 +587,7 @@ async def _crawl_render(start_url: str, depth: int,
             async def fetch_one(url: str) -> CrawledPage | None:
                 async with semaphore:
                     try:
-                        value = await _fetch_crawl_html_retry(
+                        value = await _fetch_crawl_html(
                             static_context,
                             url,
                             2,

@@ -9,7 +9,9 @@ can still be discovered.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import urljoin
 
 RENDER_TIMEOUT_MS = 25_000
 NETWORK_IDLE_MS = 6_000
@@ -197,18 +199,80 @@ async def _harvest_pagination(page, seen: set[str]) -> tuple[set[str], list[str]
     return extra, html_parts
 
 
-async def render_page_result(url: str) -> RenderedPage:
+async def render_page_result(
+    url: str,
+    navigation_allowed: Callable[[str], bool] | None = None,
+) -> RenderedPage:
     """Render a page and retain the browser's effective URL after navigation."""
     browser = await _get_browser()
     async with _state["sem"]:
         page = await browser.new_page()
         try:
+            blocked_navigation: str | None = None
+            if navigation_allowed is not None:
+                async def guard_navigation(route, request):
+                    nonlocal blocked_navigation
+                    is_main_document = (
+                        request.is_navigation_request()
+                        and request.resource_type == "document"
+                        and request.frame == page.main_frame
+                    )
+                    if is_main_document:
+                        response = await route.fetch(max_redirects=0)
+                        current_url = response.url
+                        current_response = response
+                        extra_responses = []
+                        try:
+                            for _hop in range(11):
+                                location = current_response.headers.get(
+                                    "location"
+                                )
+                                if (
+                                    current_response.status
+                                    not in {301, 302, 303, 307, 308}
+                                    or not location
+                                ):
+                                    break
+                                target = urljoin(current_url, location)
+                                try:
+                                    allowed = navigation_allowed(target)
+                                except Exception:
+                                    allowed = False
+                                if not allowed:
+                                    blocked_navigation = target
+                                    await route.abort("blockedbyclient")
+                                    return
+                                current_url = target
+                                current_response = (
+                                    await page.context.request.get(
+                                        target,
+                                        max_redirects=0,
+                                        fail_on_status_code=False,
+                                    )
+                                )
+                                extra_responses.append(current_response)
+                            else:
+                                blocked_navigation = current_url
+                                await route.abort("blockedbyclient")
+                                return
+                            await route.fulfill(response=response)
+                            return
+                        finally:
+                            for extra in extra_responses:
+                                await extra.dispose()
+                    await route.continue_()
+
+                await page.route("**/*", guard_navigation)
             try:
                 resp = await page.goto(
                     url, timeout=RENDER_TIMEOUT_MS,
                     wait_until="domcontentloaded")
             except Exception as exc:
+                if blocked_navigation is not None:
+                    raise RenderError("重定向到站外地址") from exc
                 raise RenderError(f"页面加载失败：{exc}") from exc
+            if blocked_navigation is not None:
+                raise RenderError("重定向到站外地址")
             if resp is not None and resp.status >= 400:
                 raise RenderError(f"HTTP {resp.status}")
             await _wait_idle(page)
