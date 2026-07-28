@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
+import re
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urljoin,
+    urlsplit,
+    urlunsplit,
+)
 
 import httpx
 
@@ -50,9 +57,23 @@ class Provider:
     ) -> tuple[str, str] | None:
         source = source or self.source
         self.stats.sources_tried.add(source)
-        if not self.budget.reserve_provider(budget_source or source, limit):
+        budget_key = budget_source or source
+        provider_used = self.budget.provider_requests.get(budget_key, 0)
+        if self.budget.expired() or provider_used >= limit:
+            return None
+        if (
+            counts_as_html
+            and self.budget.used_html_pages >= self.budget.page_limit
+        ):
+            self.stats.partial = True
+            return None
+        if not self.budget.reserve_provider(budget_key, limit):
             return None
         if counts_as_html and not self.budget.reserve_html():
+            if provider_used:
+                self.budget.provider_requests[budget_key] = provider_used
+            else:
+                self.budget.provider_requests.pop(budget_key, None)
             self.stats.partial = True
             return None
         try:
@@ -258,14 +279,30 @@ class CategoryProvider(Provider):
             ):
                 rendered = await self.fetcher.fetch_rendered(final_url)
                 if rendered is not None:
-                    _rendered_html, links = rendered
+                    rendered_html, links = rendered
+                    excluded_rendered_urls = set(
+                        parse_pagination(
+                            rendered_html, final_url, self.policy
+                        )
+                    )
+                    excluded_rendered_urls.update(
+                        filter(
+                            None,
+                            (
+                                normalize_candidate_url(final_url),
+                                normalize_candidate_url(url),
+                            ),
+                        )
+                    )
                     rendered_candidates = []
                     for link in links:
                         normalized = normalize_candidate_url(
                             urljoin(final_url, link)
                         )
-                        if normalized and url_allowed(
-                            normalized, self.policy
+                        if (
+                            normalized
+                            and normalized not in excluded_rendered_urls
+                            and url_allowed(normalized, self.policy)
                         ):
                             rendered_candidates.append(
                                 Candidate(
@@ -359,14 +396,21 @@ class FreeCmsApiProvider(Provider):
                 candidate_url = urljoin(self.adapter.origin + "/", raw)
                 item_id = row.get("id")
                 query_keys = {
-                    key for key, _value in parse_qsl(
+                    key
+                    for key, _value in parse_qsl(
                         urlsplit(candidate_url).query,
                         keep_blank_values=True,
                     )
                 }
                 if item_id and "id" not in query_keys:
-                    separator = "&" if "?" in candidate_url else "?"
-                    candidate_url += separator + urlencode({"id": item_id})
+                    parts = urlsplit(candidate_url)
+                    query = parse_qsl(
+                        parts.query, keep_blank_values=True
+                    )
+                    query.append(("id", str(item_id)))
+                    candidate_url = urlunsplit(
+                        parts._replace(query=urlencode(query, doseq=True))
+                    )
                 candidate_url = normalize_candidate_url(candidate_url)
                 if (
                     not candidate_url
@@ -411,6 +455,8 @@ class YunnanCmsProvider(Provider):
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         result: list[Candidate] = []
         seen: set[str] = set()
+        source_was_successful = self.source in self.stats.sources_succeeded
+        page_success = False
         for keyword_index, keyword in enumerate(keywords[:6]):
             count = await self.get_text(
                 self.adapter.origin + "/searchClassCount.aspx",
@@ -420,6 +466,20 @@ class YunnanCmsProvider(Provider):
                 budget_source=f"{self.source}-count-{keyword_index}",
             )
             if count is None:
+                continue
+            count_body, _count_final_url = count
+            stripped_count = count_body.strip()
+            count_match = (
+                re.search(r"(?<![-\d])\d+", stripped_count)
+                if len(stripped_count) <= 200
+                else None
+            )
+            if count_match is None:
+                self.stats.warnings.append(
+                    f"{self.source}: invalid count"
+                )
+                continue
+            if int(count_match.group()) == 0:
                 continue
             for page_no in range(1, 11):
                 loaded = await self.get_text(
@@ -433,6 +493,7 @@ class YunnanCmsProvider(Provider):
                 )
                 if loaded is None:
                     break
+                page_success = True
                 body, final_url = loaded
                 batch = parse_result_candidates(
                     body,
@@ -447,4 +508,8 @@ class YunnanCmsProvider(Provider):
                         result.append(item)
                 if not batch:
                     break
+        if source_was_successful or page_success:
+            self.stats.sources_succeeded.add(self.source)
+        else:
+            self.stats.sources_succeeded.discard(self.source)
         return result

@@ -165,10 +165,15 @@ def test_category_rendering_uses_fetcher_shared_budget_and_normalizes_links(
         async def render_page(url: str):
             render_calls.append(url)
             return (
-                "<main>rendered</main>",
+                """
+                <main>rendered</main>
+                <a class="page" href="/next">下一页</a>
+                """,
                 [
                     "https://x.test/rendered?utm_source=test",
                     "https://x.test/rendered",
+                    "https://x.test/next",
+                    "https://x.test/news",
                     "https://outside.test/no",
                 ],
             )
@@ -258,7 +263,39 @@ def test_provider_budget_rejection_avoids_request_and_marks_html_partial():
         assert result == []
         assert calls == 0
         assert stats.partial is True
-        assert budget.provider_requests == {"site-search": 1}
+        assert budget.provider_requests == {}
+        assert budget.used_html_pages == 0
+
+    asyncio.run(run())
+
+
+def test_provider_budget_rejection_does_not_consume_html_budget():
+    async def run():
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, text="<main/>")
+
+        budget = BudgetManager()
+        budget.provider_requests["site-search"] = 10
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await SearchProvider(
+                client,
+                budget,
+                stats,
+                POLICY,
+                [SearchSpec("site-search", "https://x.test/search", "q")],
+            ).discover(["alpha"])
+
+        assert result == []
+        assert calls == 0
+        assert budget.used_html_pages == 0
+        assert stats.partial is False
 
     asyncio.run(run())
 
@@ -275,6 +312,11 @@ def test_freecms_id_detection_uses_exact_query_key():
                 "pageUrl": "/existing/view?id=99",
                 "id": "42",
                 "title": "existing",
+            },
+            {
+                "pageUrl": "/fragment/view#frag",
+                "id": "42",
+                "title": "fragment",
             },
         ]
         transport = httpx.MockTransport(
@@ -295,6 +337,7 @@ def test_freecms_id_detection_uses_exact_query_key():
         assert [item.url for item in result] == [
             "https://x.test/grid/view?grid=1&id=42&otherid=7",
             "https://x.test/existing/view?id=99",
+            "https://x.test/fragment/view?id=42",
         ]
 
     asyncio.run(run())
@@ -433,6 +476,84 @@ def test_yunnan_count_is_requested_for_each_keyword_and_empty_batch_stops():
             ("/searchClassCount.aspx", "beta"),
         ]
         assert requests.count(("/searchN.aspx", "beta")) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("count_body", "expected_warning"),
+    [
+        ("0", None),
+        ("共 0 条", None),
+        ("not available", "site-search: invalid count"),
+        ("-1", "site-search: invalid count"),
+    ],
+)
+def test_yunnan_zero_or_invalid_count_skips_result_pages(
+    count_body,
+    expected_warning,
+):
+    async def run():
+        requested_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_paths.append(request.url.path)
+            return httpx.Response(200, text=count_body)
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await YunnanCmsProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                YunnanCmsAdapter("https://x.test/start"),
+            ).discover(["alpha"])
+
+        assert result == []
+        assert requested_paths == ["/searchClassCount.aspx"]
+        assert stats.sources_succeeded == set()
+        assert stats.warnings == (
+            [expected_warning] if expected_warning else []
+        )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("page_status", "expected_success"),
+    [(503, False), (200, True)],
+)
+def test_yunnan_success_requires_a_successful_result_page(
+    page_status,
+    expected_success,
+):
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("searchClassCount.aspx"):
+                return httpx.Response(200, text="共 1 条")
+            return httpx.Response(
+                page_status,
+                text='<main><a href="/alpha">alpha</a></main>',
+            )
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            await YunnanCmsProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                YunnanCmsAdapter("https://x.test/start"),
+            ).discover(["alpha"])
+
+        assert (
+            "site-search" in stats.sources_succeeded
+        ) is expected_success
 
     asyncio.run(run())
 
