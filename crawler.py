@@ -5,6 +5,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -52,10 +53,15 @@ class FetchedHtml:
 class _CrawlHttpContext:
     client: httpx.AsyncClient
     redirect_allowed: Callable[[str], bool]
+    reserve_request: Callable[[], bool] | None = None
 
 
 class UnsafeRedirect(ValueError):
     """A crawl redirect attempted to leave its permitted site boundary."""
+
+
+class PageBudgetExhausted(RuntimeError):
+    """A main-document request was refused by the shared page budget."""
 
 
 @dataclass
@@ -160,18 +166,40 @@ def describe_error(exc: Exception) -> str:
 async def fetch_html_response(
     client: httpx.AsyncClient,
     url: str,
+    reserve_request: Callable[[], bool] | None = None,
 ) -> FetchedHtml:
-    response = await client.get(url)
-    response.raise_for_status()
-    content_type = response.headers.get("content-type", "")
-    if "html" not in content_type.lower():
-        raise ValueError(f"非 HTML 内容 ({content_type or '未知类型'})")
-    return FetchedHtml(response.text, str(response.url))
+    if reserve_request is None:
+        response = await client.get(url)
+        return _html_from_response(response)
+
+    current_url = url
+    for _hop in range(MAX_REDIRECT_HOPS + 1):
+        if not reserve_request():
+            raise PageBudgetExhausted("页面预算已用尽")
+        response = await client.get(
+            current_url, follow_redirects=False
+        )
+        if response.is_redirect and response.headers.get("location"):
+            current_url = urljoin(
+                str(response.url), response.headers["location"]
+            )
+            continue
+        return _html_from_response(response)
+    raise httpx.TooManyRedirects(
+        "重定向次数过多",
+        request=httpx.Request("GET", current_url),
+    )
 
 
-async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
+async def fetch_html(
+    client: httpx.AsyncClient,
+    url: str,
+    reserve_request: Callable[[], bool] | None = None,
+) -> str:
     """Fetch HTML while preserving the historical string return contract."""
-    return (await fetch_html_response(client, url)).html
+    return (
+        await fetch_html_response(client, url, reserve_request)
+    ).html
 
 
 RETRYABLE_TRANSPORT = (httpx.ConnectError, httpx.RemoteProtocolError,
@@ -195,6 +223,11 @@ async def _fetch_html_manual_redirect(
 ) -> FetchedHtml:
     current_url = url
     for _hop in range(MAX_REDIRECT_HOPS + 1):
+        if (
+            context.reserve_request is not None
+            and not context.reserve_request()
+        ):
+            raise PageBudgetExhausted("页面预算已用尽")
         response = await context.client.get(
             current_url,
             follow_redirects=False,
@@ -243,6 +276,7 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
                            attempts: int = 4,
                            base_delay: float = 1.5,
                            include_final_url: bool = False,
+                           reserve_request: Callable[[], bool] | None = None,
                            ) -> str | FetchedHtml:
     """带重试的页面抓取：政府站 WAF 常间歇性拒连/掐断响应/偶发 5xx，
     瞬时失败用指数退避重试（1.5s/3s/6s），非瞬时错误（4xx、非 HTML）
@@ -252,8 +286,10 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
     for attempt in range(attempts):
         try:
             if include_final_url:
-                return await fetch_html_response(client, url)
-            return await fetch_html(client, url)
+                return await fetch_html_response(
+                    client, url, reserve_request
+                )
+            return await fetch_html(client, url, reserve_request)
         except RETRYABLE_TRANSPORT as exc:
             last_exc = exc
         except httpx.HTTPStatusError as exc:
@@ -287,6 +323,11 @@ async def _fetch_crawl_html(
 ) -> FetchedHtml:
     """Honor legacy public test patches; otherwise use the secure crawl path."""
     if fetch_html_retry is not _ORIGINAL_FETCH_HTML_RETRY:
+        if (
+            context.reserve_request is not None
+            and not context.reserve_request()
+        ):
+            raise PageBudgetExhausted("页面预算已用尽")
         value = await fetch_html_retry(
             context.client,
             url,
@@ -362,7 +403,8 @@ async def await_before_deadline(coroutine, deadline: float | None):
 async def crawl(start_url: str, depth: int = 1,
                 max_pages: int = MAX_TOTAL_PAGES,
                 render: bool = False,
-                deadline: float | None = None) -> CrawlResult:
+                deadline: float | None = None,
+                budget: Any | None = None) -> CrawlResult:
     """Fetch start page and its same-site pages level by level (BFS).
 
     depth=1 crawls the start page plus pages it directly links to;
@@ -375,12 +417,10 @@ async def crawl(start_url: str, depth: int = 1,
     RENDER_MAX_PAGES。
     """
     if render:
-        return await _crawl_render(
-            start_url,
-            depth,
-            max_pages=max_pages,
-            deadline=deadline,
-        )
+        kwargs = {"max_pages": max_pages, "deadline": deadline}
+        if budget is not None:
+            kwargs["budget"] = budget
+        return await _crawl_render(start_url, depth, **kwargs)
     result = CrawlResult()
     async with httpx.AsyncClient(
         timeout=PAGE_TIMEOUT,
@@ -390,16 +430,24 @@ async def crawl(start_url: str, depth: int = 1,
         start_context = _CrawlHttpContext(
             client,
             lambda target: same_site_boundary(start_url, target),
+            None if budget is None else budget.reserve_html,
         )
-        start_value, deadline_reached = await await_before_deadline(
-            _fetch_crawl_html(
-                start_context,
-                start_url,
-                4,
-                1.5,
-            ),
-            deadline,
-        )
+        try:
+            start_value, deadline_reached = await await_before_deadline(
+                _fetch_crawl_html(
+                    start_context,
+                    start_url,
+                    4,
+                    1.5,
+                ),
+                deadline,
+            )
+        except PageBudgetExhausted:
+            result.failed.append({
+                "url": start_url,
+                "reason": "页面预算已用尽",
+            })
+            return result
         if deadline_reached:
             result.failed.append({
                 "url": start_url,
@@ -418,6 +466,7 @@ async def crawl(start_url: str, depth: int = 1,
         child_context = _CrawlHttpContext(
             client,
             lambda target: canonical_authority(target) == effective_authority,
+            None if budget is None else budget.reserve_html,
         )
         visited = {
             normalize_url(start_url),
@@ -441,6 +490,12 @@ async def crawl(start_url: str, depth: int = 1,
                     result.failed.append({
                         "url": url,
                         "reason": "重定向到站外地址",
+                    })
+                    return None
+                except PageBudgetExhausted:
+                    result.failed.append({
+                        "url": url,
+                        "reason": "页面预算已用尽",
                     })
                     return None
                 except Exception as exc:  # noqa: BLE001 - collected, not raised
@@ -489,7 +544,8 @@ async def crawl(start_url: str, depth: int = 1,
 
 async def _crawl_render(start_url: str, depth: int,
                         max_pages: int = RENDER_MAX_PAGES,
-                        deadline: float | None = None) -> CrawlResult:
+                        deadline: float | None = None,
+                        budget: Any | None = None) -> CrawlResult:
     """BFS over rendered pages: links come from the live DOM (including
     pagination harvest), so JS-injected list items are discoverable."""
     import renderer
@@ -511,13 +567,18 @@ async def _crawl_render(start_url: str, depth: int,
         return normalized
 
     try:
+        start_render_kwargs = {
+            "navigation_allowed": lambda target: same_site_boundary(
+                start_url,
+                target,
+            ),
+        }
+        if budget is not None:
+            start_render_kwargs["reserve_request"] = budget.reserve_html
         start_loaded, deadline_reached = await await_before_deadline(
             renderer.render_page_result(
                 start_url,
-                navigation_allowed=lambda target: same_site_boundary(
-                    start_url,
-                    target,
-                ),
+                **start_render_kwargs,
             ),
             deadline,
         )
@@ -549,11 +610,16 @@ async def _crawl_render(start_url: str, depth: int,
 
     async def render_one(url: str):
         try:
-            rendered = await renderer.render_page_result(
-                url,
-                navigation_allowed=lambda target: (
+            render_kwargs = {
+                "navigation_allowed": lambda target: (
                     canonical_authority(target) == effective_authority
                 ),
+            }
+            if budget is not None:
+                render_kwargs["reserve_request"] = budget.reserve_html
+            rendered = await renderer.render_page_result(
+                url,
+                **render_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - collected, not raised
             result.failed.append(
@@ -582,6 +648,7 @@ async def _crawl_render(start_url: str, depth: int,
                 lambda target: (
                     canonical_authority(target) == effective_authority
                 ),
+                None if budget is None else budget.reserve_html,
             )
 
             async def fetch_one(url: str) -> CrawledPage | None:
@@ -597,6 +664,12 @@ async def _crawl_render(start_url: str, depth: int,
                         result.failed.append({
                             "url": url,
                             "reason": "重定向到站外地址",
+                        })
+                        return None
+                    except PageBudgetExhausted:
+                        result.failed.append({
+                            "url": url,
+                            "reason": "页面预算已用尽",
                         })
                         return None
                     except Exception as exc:  # noqa: BLE001 - collected, not raised

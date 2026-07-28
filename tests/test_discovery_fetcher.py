@@ -38,6 +38,65 @@ def test_fetch_html_consumes_shared_budget_without_second_request():
     asyncio.run(run())
 
 
+def test_fetch_html_cancels_slow_request_at_shared_deadline(monkeypatch):
+    cancelled = False
+
+    async def slow_fetch(*args, **kwargs):
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    monkeypatch.setattr("discovery.fetcher.fetch_html_retry", slow_fetch)
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            budget = BudgetManager(timeout_seconds=0.02)
+            stats = DiscoveryStats()
+            fetcher = DiscoveryFetcher(client, budget, stats)
+            assert await fetcher.fetch_html("https://x.test/slow") is None
+            assert stats.partial is True
+
+    asyncio.run(run())
+    assert cancelled is True
+
+
+def test_fetch_html_counts_redirect_hops_before_request():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            if request.url.path == "/start":
+                return httpx.Response(
+                    302, headers={"location": "/final"}
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<main>final</main>",
+            )
+
+        budget = BudgetManager(initial_pages=1, max_pages=1)
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            fetcher = DiscoveryFetcher(client, budget, stats)
+            assert await fetcher.fetch_html(
+                "https://x.test/start"
+            ) is None
+
+        assert requested == ["https://x.test/start"]
+        assert budget.used_html_pages == 1
+        assert stats.partial is True
+
+    asyncio.run(run())
+
+
 def test_non_html_is_recorded_without_crashing():
     async def run():
         transport = httpx.MockTransport(

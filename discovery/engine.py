@@ -143,6 +143,39 @@ def _deduplicate_specs(specs: list[SearchSpec]) -> list[SearchSpec]:
     return result
 
 
+async def _gather_candidates(coroutines, budget: BudgetManager):
+    tasks = [asyncio.create_task(item) for item in coroutines]
+    if not tasks:
+        return [], False
+    try:
+        done, pending = await asyncio.wait(
+            tasks, timeout=budget.remaining_seconds()
+        )
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    if any(task.cancelled() for task in done):
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise asyncio.CancelledError
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    results = [
+        task.result()
+        for task in tasks
+        if task in done
+        and not task.cancelled()
+        and task.exception() is None
+    ]
+    return results, bool(pending)
+
+
 async def discover_pages(
     start_url: str,
     keywords: list[str],
@@ -152,6 +185,7 @@ async def discover_pages(
     timeout_seconds: float = 120.0,
     started_at: float | None = None,
     skip_urls: Iterable[str] = (),
+    budget: BudgetManager | None = None,
 ) -> DiscoveryRun:
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
@@ -162,13 +196,14 @@ async def discover_pages(
     adapter = select_adapter(effective_start_url, homepage)
     policy = adapter.domain_policy(effective_start_url)
     stats = DiscoveryStats(profile=adapter.profile)
-    if started_at is None:
-        started_at = time.monotonic()
-    budget = BudgetManager(
-        timeout_seconds=timeout_seconds,
-        used_html_pages=len(base_result.pages),
-        started_at=started_at,
-    )
+    if budget is None:
+        if started_at is None:
+            started_at = time.monotonic()
+        budget = BudgetManager(
+            timeout_seconds=timeout_seconds,
+            used_html_pages=len(base_result.pages),
+            started_at=started_at,
+        )
 
     detected_specs = detect_search_specs(homepage, effective_start_url)
     feed_urls = list(
@@ -224,10 +259,40 @@ async def discover_pages(
                 SearchProvider(client, budget, stats, policy, specs)
             )
 
-        batches = await asyncio.gather(
-            *(provider.discover(keywords) for provider in providers),
-            return_exceptions=True,
-        )
+        provider_tasks = [
+            asyncio.create_task(provider.discover(keywords))
+            for provider in providers
+        ]
+        try:
+            done, pending_tasks = await asyncio.wait(
+                provider_tasks,
+                timeout=budget.remaining_seconds(),
+            )
+        except BaseException:
+            for task in provider_tasks:
+                task.cancel()
+            await asyncio.gather(
+                *provider_tasks, return_exceptions=True
+            )
+            raise
+        if pending_tasks:
+            stats.partial = True
+            for task in pending_tasks:
+                task.cancel()
+            await asyncio.gather(
+                *pending_tasks, return_exceptions=True
+            )
+        batches = []
+        for task in provider_tasks:
+            if task in done and task.cancelled():
+                raise asyncio.CancelledError
+            if task not in done:
+                batches.append(TimeoutError())
+                continue
+            exception = task.exception()
+            batches.append(
+                exception if exception is not None else task.result()
+            )
         all_candidates: list[Candidate] = []
         for provider, batch in zip(providers, batches):
             if isinstance(batch, asyncio.CancelledError):
@@ -268,9 +333,11 @@ async def discover_pages(
         )
         first_batch = pending[:first_capacity]
         if first_batch:
-            fetched = await asyncio.gather(
-                *(fetch(item) for item in first_batch)
+            fetched, timed_out = await _gather_candidates(
+                [fetch(item) for item in first_batch],
+                budget,
             )
+            stats.partial = stats.partial or timed_out
             pages.extend(page for page in fetched if page is not None)
             scheduled_count += len(first_batch)
 
@@ -283,9 +350,11 @@ async def discover_pages(
             )
             second_batch = high_value[:second_capacity]
             if second_batch:
-                fetched = await asyncio.gather(
-                    *(fetch(item) for item in second_batch)
+                fetched, timed_out = await _gather_candidates(
+                    [fetch(item) for item in second_batch],
+                    budget,
                 )
+                stats.partial = stats.partial or timed_out
                 pages.extend(
                     page for page in fetched if page is not None
                 )

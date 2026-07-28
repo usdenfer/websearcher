@@ -187,12 +187,13 @@ def test_api_reserves_budget_for_structured_discovery(
     assert "discovery" in data
     assert crawl_calls[0]["max_pages"] == server.BASE_BFS_PAGE_BUDGET
     assert crawl_calls[0]["deadline"] >= before
+    assert crawl_calls[0]["budget"].initial_pages == 60
+    assert crawl_calls[0]["budget"].max_pages == 120
     args, kwargs = discovery_calls[0]
     assert args[0] == f"{site_server}/index.html"
     assert args[1] == ["alpha"]
     assert args[3:5] == (3, "off")
-    assert kwargs["timeout_seconds"] == server.SEARCH_BUDGET_SECONDS
-    assert kwargs["started_at"] <= crawl_calls[0]["deadline"]
+    assert kwargs["budget"] is crawl_calls[0]["budget"]
 
 
 def test_discovery_failure_returns_base_body_results(
@@ -280,6 +281,45 @@ def test_empty_start_page_result_returns_502(monkeypatch):
         ))
     assert raised.value.status_code == 502
     assert "搜索截止时间已到" in raised.value.detail
+
+
+def test_keyword_expansion_obeys_end_to_end_deadline(monkeypatch):
+    cancelled = False
+
+    async def slow_expand(keywords, host):
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url, "<main>alpha</main>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(),
+        )
+
+    monkeypatch.setattr(server, "SEARCH_BUDGET_SECONDS", 0.02)
+    monkeypatch.setattr(server, "expand_keywords", slow_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    request = server.SearchRequest(
+        startUrl="https://deadline.test/",
+        keywords=["alpha"],
+        render="off",
+    )
+
+    response = asyncio.run(server.search(request))
+
+    assert cancelled is True
+    assert response["expandedKeywords"] == []
 
 
 def test_search_no_hit(site_server):

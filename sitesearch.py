@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup
 
 from crawler import (CONCURRENCY, PAGE_TIMEOUT, USER_AGENT, CrawledPage,
                      crawl, fetch_html_retry, is_binary_url, normalize_url)
-from discovery import discover_pages
+from discovery import BudgetManager, discover_pages
 from discovery.urltools import normalize_candidate_url
 
 COUNT_PATH = "/searchClassCount.aspx"
@@ -123,9 +123,15 @@ async def collect_pages(start_url: str, keywords: list[str],
         "pagesFetched": 0,
         "deprecated": True,
     }
+    budget = BudgetManager()
     try:
         base = await crawl(
-            start_url, depth=0, max_pages=1, render=False,
+            start_url,
+            depth=0,
+            max_pages=1,
+            render=False,
+            deadline=budget.deadline,
+            budget=budget,
         )
     except asyncio.CancelledError:
         raise
@@ -136,7 +142,13 @@ async def collect_pages(start_url: str, keywords: list[str],
 
     try:
         run = await discover_pages(
-            start_url, keywords, base, 1, "off", skip_urls=skip,
+            start_url,
+            keywords,
+            base,
+            1,
+            "off",
+            skip_urls=skip,
+            budget=budget,
         )
     except asyncio.CancelledError:
         raise

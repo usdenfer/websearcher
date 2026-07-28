@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import deque
 from urllib.parse import (
@@ -78,8 +79,18 @@ class Provider:
             self.stats.partial = True
             return None
         try:
-            response = await self.client.get(url, params=params)
-            response.raise_for_status()
+            remaining = self.budget.remaining_seconds()
+            if remaining <= 0:
+                self.stats.partial = True
+                return None
+            async with asyncio.timeout(remaining):
+                response = await self.client.get(url, params=params)
+                response.raise_for_status()
+        except TimeoutError:
+            self.stats.partial = True
+            return None
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self.stats.warnings.append(f"{source}: {type(exc).__name__}")
             return None

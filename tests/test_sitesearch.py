@@ -155,14 +155,19 @@ def test_collect_pages_delegates_to_discovery_and_normalizes_skip(monkeypatch):
         skip={"https://x.test/old?utm_campaign=seen"},
     ))
 
-    assert calls["crawl"] == (
-        "https://x.test/",
-        {"depth": 0, "max_pages": 1, "render": False},
-    )
-    assert calls["discover"] == (
+    crawl_url, crawl_kwargs = calls["crawl"]
+    assert crawl_url == "https://x.test/"
+    assert crawl_kwargs["depth"] == 0
+    assert crawl_kwargs["max_pages"] == 1
+    assert crawl_kwargs["render"] is False
+    discover = calls["discover"]
+    assert discover[:5] == (
         "https://x.test/", ["alpha"], base, 1, "off",
-        {"skip_urls": {"https://x.test/old?utm_campaign=seen"}},
     )
+    assert discover[5]["skip_urls"] == {
+        "https://x.test/old?utm_campaign=seen"
+    }
+    assert discover[5]["budget"] is crawl_kwargs["budget"]
     assert [page.url for page in pages] == [
         "https://x.test/new.html",
     ]

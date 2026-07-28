@@ -93,6 +93,23 @@ def test_crawl_preserves_redirected_home_and_resolves_relative_links(
     assert redirect_site["keyword"] in result.pages[1].html
 
 
+def test_crawl_counts_each_redirect_document_request_against_budget(
+        redirect_site):
+    from discovery.models import BudgetManager
+
+    budget = BudgetManager(initial_pages=1, max_pages=1)
+    result = asyncio.run(crawl(
+        redirect_site["start"], depth=1, budget=budget,
+    ))
+
+    assert budget.used_html_pages == 1
+    assert result.pages == []
+    assert result.failed == [{
+        "url": redirect_site["start"],
+        "reason": "页面预算已用尽",
+    }]
+
+
 def test_crawl_rejects_subpage_redirect_outside_effective_root(
         redirect_site):
     redirect_site["handler"].outside_requests = 0

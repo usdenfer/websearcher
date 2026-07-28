@@ -88,7 +88,14 @@ class BudgetManager:
         self.page_limit = self.initial_pages
 
     def expired(self) -> bool:
-        return time.monotonic() - self.started_at >= self.timeout_seconds
+        return self.remaining_seconds() <= 0
+
+    @property
+    def deadline(self) -> float:
+        return self.started_at + self.timeout_seconds
+
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
 
     def reserve_html(self) -> bool:
         if self.expired() or self.used_html_pages >= self.page_limit:

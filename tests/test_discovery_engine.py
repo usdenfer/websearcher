@@ -14,7 +14,12 @@ from discovery.engine import (
     merge_candidates,
     rank_candidates,
 )
-from discovery.models import Candidate, DomainPolicy, SearchSpec
+from discovery.models import (
+    BudgetManager,
+    Candidate,
+    DomainPolicy,
+    SearchSpec,
+)
 
 
 def test_merge_normalizes_urls_keeps_best_score_and_stable_ties():
@@ -863,3 +868,65 @@ def test_elapsed_uses_supplied_start_time(monkeypatch):
     )
 
     assert result.stats.elapsed_ms >= 40
+
+
+def test_discover_pages_reuses_supplied_budget_without_counting_base_twice(
+    monkeypatch,
+):
+    budget = BudgetManager(initial_pages=2, max_pages=5)
+    candidate = Candidate("https://x.test/a", "sitemap", score=100)
+    _context, _providers, fetchers = _install_engine_fakes(
+        monkeypatch, batches={"sitemap": [candidate]}
+    )
+
+    result = _run(discover_pages(
+        "https://x.test/",
+        ["alpha"],
+        CrawlResult(
+            pages=[CrawledPage("https://x.test/", "<main>base</main>")]
+        ),
+        depth=1,
+        render_mode="off",
+        budget=budget,
+    ))
+
+    assert fetchers[0].budget is budget
+    assert budget.used_html_pages == 1
+    assert len(result.pages) == 1
+
+
+def test_provider_deadline_keeps_completed_batches_and_marks_partial(
+    monkeypatch,
+):
+    import discovery.engine as engine
+
+    candidate = Candidate("https://x.test/a", "sitemap", score=100)
+    _install_engine_fakes(
+        monkeypatch, batches={"sitemap": [candidate]}
+    )
+
+    class SlowFeed:
+        source = "feed"
+
+        def __init__(self, client, budget, stats, policy, *args, **kwargs):
+            pass
+
+        async def discover(self, keywords):
+            await asyncio.sleep(1)
+            return []
+
+    monkeypatch.setattr(engine, "FeedProvider", SlowFeed)
+    budget = BudgetManager(timeout_seconds=0.02)
+    started = time.monotonic()
+    result = _run(discover_pages(
+        "https://x.test/",
+        ["alpha"],
+        CrawlResult(),
+        depth=1,
+        render_mode="off",
+        budget=budget,
+    ))
+
+    assert time.monotonic() - started < 0.2
+    assert result.stats.candidates_found == 1
+    assert result.stats.partial is True

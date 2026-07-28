@@ -731,3 +731,31 @@ def test_provider_propagates_cancelled_error():
                 await provider.discover([])
 
     asyncio.run(run())
+
+
+def test_provider_request_is_cancelled_at_shared_deadline():
+    cancelled = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        return httpx.Response(200, text="<urlset/>")
+
+    async def run():
+        stats = DiscoveryStats()
+        budget = BudgetManager(timeout_seconds=0.02)
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await SitemapProvider(
+                client, budget, stats, POLICY, "https://x.test"
+            ).discover([])
+        assert result == []
+        assert stats.partial is True
+
+    asyncio.run(run())
+    assert cancelled is True

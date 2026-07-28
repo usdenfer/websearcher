@@ -202,6 +202,7 @@ async def _harvest_pagination(page, seen: set[str]) -> tuple[set[str], list[str]
 async def render_page_result(
     url: str,
     navigation_allowed: Callable[[str], bool] | None = None,
+    reserve_request: Callable[[], bool] | None = None,
 ) -> RenderedPage:
     """Render a page and retain the browser's effective URL after navigation."""
     browser = await _get_browser()
@@ -209,15 +210,26 @@ async def render_page_result(
         page = await browser.new_page()
         try:
             blocked_navigation: str | None = None
-            if navigation_allowed is not None:
+            budget_exhausted = False
+            if navigation_allowed is not None or reserve_request is not None:
                 async def guard_navigation(route, request):
-                    nonlocal blocked_navigation
+                    nonlocal blocked_navigation, budget_exhausted
                     is_main_document = (
                         request.is_navigation_request()
                         and request.resource_type == "document"
                         and request.frame == page.main_frame
                     )
                     if is_main_document:
+                        if (
+                            reserve_request is not None
+                            and not reserve_request()
+                        ):
+                            budget_exhausted = True
+                            await route.abort("blockedbyclient")
+                            return
+                        if navigation_allowed is None:
+                            await route.continue_()
+                            return
                         try:
                             direct_allowed = navigation_allowed(request.url)
                         except Exception:
@@ -250,6 +262,13 @@ async def render_page_result(
                                     blocked_navigation = target
                                     await route.abort("blockedbyclient")
                                     return
+                                if (
+                                    reserve_request is not None
+                                    and not reserve_request()
+                                ):
+                                    budget_exhausted = True
+                                    await route.abort("blockedbyclient")
+                                    return
                                 current_url = target
                                 current_response = (
                                     await page.context.request.get(
@@ -276,11 +295,15 @@ async def render_page_result(
                     url, timeout=RENDER_TIMEOUT_MS,
                     wait_until="domcontentloaded")
             except Exception as exc:
+                if budget_exhausted:
+                    raise RenderError("页面预算已用尽") from exc
                 if blocked_navigation is not None:
                     raise RenderError("重定向到站外地址") from exc
                 raise RenderError(f"页面加载失败：{exc}") from exc
             if blocked_navigation is not None:
                 raise RenderError("重定向到站外地址")
+            if budget_exhausted:
+                raise RenderError("页面预算已用尽")
             if resp is not None and resp.status >= 400:
                 raise RenderError(f"HTTP {resp.status}")
             await _wait_idle(page)
@@ -300,7 +323,12 @@ async def render_page_result(
                 pass
 
 
-async def render_page(url: str) -> tuple[str, list[str]]:
+async def render_page(
+    url: str,
+    reserve_request: Callable[[], bool] | None = None,
+) -> tuple[str, list[str]]:
     """渲染 URL，返回 (最终 HTML, 页面及翻页中发现的全部 http(s) 链接)。"""
-    result = await render_page_result(url)
+    result = await render_page_result(
+        url, reserve_request=reserve_request
+    )
     return result.html, result.links

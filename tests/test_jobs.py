@@ -168,6 +168,7 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(
     monkeypatch.setattr(jobs.asyncio, "timeout", tracking_timeout)
 
     async def fake_crawl(url, **kwargs):
+        calls["crawl_budget"] = kwargs["budget"]
         return base
 
     async def fake_expand(keywords, host):
@@ -206,11 +207,9 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(
     assert calls["args"] == (
         "https://x.test/", ["alpha"], 1, "off",
     )
-    assert calls["kwargs"]["timeout_seconds"] == (
-        jobs.STATIC_BUDGET_SECONDS
-    )
-    assert isinstance(calls["kwargs"]["started_at"], float)
-    assert timeout_calls == [jobs.STATIC_BUDGET_SECONDS]
+    assert calls["kwargs"]["budget"] is calls["crawl_budget"]
+    assert calls["kwargs"]["budget"].timeout_seconds == 120
+    assert timeout_calls == []
     assert result["pagesCrawled"] == 2
     assert result["totalHits"] == 2
     assert base.failed == [

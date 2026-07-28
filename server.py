@@ -29,7 +29,12 @@ from ai import (AIError, ask_prompt, chat_stream, expand_keywords,
                 summarize_prompt)
 from cache import get as cache_get
 from cache import put as cache_put
-from discovery import DiscoveryRun, DiscoveryStats, discover_pages
+from discovery import (
+    BudgetManager,
+    DiscoveryRun,
+    DiscoveryStats,
+    discover_pages,
+)
 from locator import build_locate_page
 from matcher import (
     extract_main_text,
@@ -91,7 +96,8 @@ async def index() -> FileResponse:
 
 
 async def _crawl_or_502(url: str, depth: int, render: bool,
-                        deadline: float) -> CrawlResult:
+                        deadline: float,
+                        budget: BudgetManager | None = None) -> CrawlResult:
     try:
         result = await crawl(
             url,
@@ -99,6 +105,7 @@ async def _crawl_or_502(url: str, depth: int, render: bool,
             max_pages=BASE_BFS_PAGE_BUDGET,
             render=render,
             deadline=deadline,
+            budget=budget,
         )
         if not result.pages:
             reason = (
@@ -124,9 +131,19 @@ def _match_crawl(crawl_result, all_keywords: list[str]) -> tuple[list, int]:
 @app.post("/api/search")
 async def search(req: SearchRequest) -> dict:
     search_started = time.monotonic()
-    deadline = search_started + SEARCH_BUDGET_SECONDS
+    budget = BudgetManager(
+        initial_pages=60,
+        max_pages=120,
+        timeout_seconds=SEARCH_BUDGET_SECONDS,
+        started_at=search_started,
+    )
+    deadline = budget.deadline
     host = urlsplit(req.startUrl).netloc
-    expanded = await expand_keywords(req.keywords, host)
+    try:
+        async with asyncio.timeout(budget.remaining_seconds()):
+            expanded = await expand_keywords(req.keywords, host)
+    except TimeoutError:
+        expanded = []
     all_keywords = req.keywords + [
         k for k in expanded if k not in req.keywords]
 
@@ -134,11 +151,11 @@ async def search(req: SearchRequest) -> dict:
     auto_note = None
     if req.render == "on":
         crawl_result = await _crawl_or_502(
-            req.startUrl, req.depth, True, deadline)
+            req.startUrl, req.depth, True, deadline, budget)
         render_used = True
     else:
         crawl_result = await _crawl_or_502(
-            req.startUrl, req.depth, False, deadline)
+            req.startUrl, req.depth, False, deadline, budget)
         if req.render == "auto" and crawl_result.pages:
             _, static_hits = _match_crawl(crawl_result, all_keywords)
             js_suspect = looks_js_driven(crawl_result.pages[0].html)
@@ -146,7 +163,7 @@ async def search(req: SearchRequest) -> dict:
                                     and static_hits <= AUTO_LOW_HITS):
                 try:
                     render_result = await _crawl_or_502(
-                        req.startUrl, req.depth, True, deadline)
+                        req.startUrl, req.depth, True, deadline, budget)
                 except HTTPException:
                     auto_note = "静态结果可能不完整，自动渲染补搜失败"
                 else:
@@ -165,8 +182,7 @@ async def search(req: SearchRequest) -> dict:
             crawl_result,
             req.depth,
             req.render,
-            timeout_seconds=SEARCH_BUDGET_SECONDS,
-            started_at=search_started,
+            budget=budget,
         )
     except Exception as exc:
         discovery_run = DiscoveryRun(

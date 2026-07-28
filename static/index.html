@@ -286,9 +286,9 @@ async function run() {
   document.getElementById("sumErr").textContent = "";
   document.getElementById("qaList").innerHTML = "";
   btn.disabled = true;
-  const hint = renderMode === "on" ? "，浏览器渲染抓取较慢，可能需要 2–8 分钟"
-    : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜（最长几分钟）"
-    : depth > 1 ? "，深度抓取可能需要 1–2 分钟" : "，通常需要 10–40 秒";
+  const hint = renderMode === "on" ? "，浏览器渲染抓取较慢，最长约 120 秒，达到预算会返回部分结果"
+    : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜，最长约 120 秒"
+    : depth > 1 ? "，深度抓取最长约 120 秒，达到预算会返回部分结果" : "，通常需要 10–40 秒";
   out.innerHTML = `<div class="status"><span class="spinner"></span>正在按深度 ${depth} 层抓取页面并搜索${hint}…</div>`;
   try {
     const resp = await fetch("/api/search", {

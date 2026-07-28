@@ -19,8 +19,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 JOBS_FILE = Path(__file__).parent / "data" / "jobs.json"
-STATIC_BUDGET_SECONDS = 120
-RENDER_BUDGET_SECONDS = 600
+SEARCH_BUDGET_SECONDS = 120
+BASE_BFS_PAGE_BUDGET = 30
 AUTO_LOW_HITS = 3
 MAX_HIT_KEYS = 500
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -187,26 +187,47 @@ async def run_job(store: JobStore, job_id: str,
     job["running"] = True
     store.update(job)
     try:
+        from discovery import BudgetManager
+
+        search_started = time.monotonic()
+        budget = BudgetManager(
+            initial_pages=60,
+            max_pages=120,
+            timeout_seconds=SEARCH_BUDGET_SECONDS,
+            started_at=search_started,
+        )
+        deadline = budget.deadline
         host = urlsplit(job["startUrl"]).netloc
-        expanded = await expand_fn(job["keywords"], host)
+        from crawler import await_before_deadline
+        expanded_value, expansion_timed_out = await await_before_deadline(
+            expand_fn(job["keywords"], host), deadline
+        )
+        expanded = [] if expansion_timed_out else expanded_value
         all_keywords = job["keywords"] + [
             k for k in expanded if k not in job["keywords"]]
 
-        search_started = time.monotonic()
         render_used = False
         mode = job.get("render", "auto")
-        budget = (RENDER_BUDGET_SECONDS if mode == "on"
-                  else STATIC_BUDGET_SECONDS)
         try:
             if mode == "on":
-                async with asyncio.timeout(budget):
-                    crawl_result = await crawl_fn(
-                        job["startUrl"], depth=job["depth"], render=True)
+                crawl_result = await crawl_fn(
+                    job["startUrl"],
+                    depth=job["depth"],
+                    max_pages=BASE_BFS_PAGE_BUDGET,
+                    render=True,
+                    deadline=deadline,
+                    budget=budget,
+                )
                 render_used = True
             else:
-                async with asyncio.timeout(budget):
-                    crawl_result = await crawl_fn(
-                        job["startUrl"], depth=job["depth"], render=False)
+                crawl_result = await crawl_fn(
+                    job["startUrl"],
+                    depth=job["depth"],
+                    max_pages=BASE_BFS_PAGE_BUDGET,
+                    render=False,
+                    deadline=deadline,
+                    budget=budget,
+                )
                 if mode == "auto" and crawl_result.pages:
                     from matcher import (
                         looks_js_driven,
@@ -217,10 +238,14 @@ async def run_job(store: JobStore, job_id: str,
                     if static_hits == 0 or (
                             looks_js_driven(crawl_result.pages[0].html)
                             and static_hits <= AUTO_LOW_HITS):
-                        async with asyncio.timeout(RENDER_BUDGET_SECONDS):
-                            render_result = await crawl_fn(
-                                job["startUrl"], depth=job["depth"],
-                                render=True)
+                        render_result = await crawl_fn(
+                            job["startUrl"],
+                            depth=job["depth"],
+                            max_pages=BASE_BFS_PAGE_BUDGET,
+                            render=True,
+                            deadline=deadline,
+                            budget=budget,
+                        )
                         _, render_hits = match_body_crawl_result(
                             render_result.pages, all_keywords)
                         if render_hits > static_hits:
@@ -241,8 +266,7 @@ async def run_job(store: JobStore, job_id: str,
                 crawl_result,
                 job["depth"],
                 mode,
-                timeout_seconds=budget,
-                started_at=search_started,
+                budget=budget,
             )
             seen = {
                 normalize_candidate_url(page.url)

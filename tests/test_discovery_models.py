@@ -73,6 +73,17 @@ def test_budget_manager_expiration_uses_monotonic(monkeypatch):
     assert budget.expired()
 
 
+def test_budget_exposes_non_negative_remaining_deadline(monkeypatch):
+    monkeypatch.setattr("discovery.models.time.monotonic", lambda: 130.0)
+    budget = BudgetManager(timeout_seconds=120, started_at=100.0)
+
+    assert budget.deadline == 220.0
+    assert budget.remaining_seconds() == 90.0
+
+    monkeypatch.setattr("discovery.models.time.monotonic", lambda: 230.0)
+    assert budget.remaining_seconds() == 0.0
+
+
 def test_discovery_stats_defaults_to_generic_profile():
     assert DiscoveryStats().profile == "generic"
 

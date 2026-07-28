@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from urllib.parse import urlsplit
 
 import httpx
 
-from crawler import PAGE_TIMEOUT, USER_AGENT, fetch_html_retry
+from crawler import (
+    PAGE_TIMEOUT,
+    USER_AGENT,
+    PageBudgetExhausted,
+    fetch_html_retry,
+)
 from discovery.models import BudgetManager, DiscoveryStats
 from discovery.urltools import canonical_host
 
@@ -77,13 +83,26 @@ class DiscoveryFetcher:
         return False
 
     async def fetch_html(self, url: str) -> str | None:
-        if not self._reserve():
-            return None
         async with self.semaphore, self.host_semaphore(url):
             try:
-                return await fetch_html_retry(
-                    self.client, url, attempts=2, base_delay=1.0
-                )
+                remaining = self.budget.remaining_seconds()
+                if remaining <= 0:
+                    self.stats.partial = True
+                    return None
+                async with asyncio.timeout(remaining):
+                    return await fetch_html_retry(
+                        self.client,
+                        url,
+                        attempts=2,
+                        base_delay=1.0,
+                        reserve_request=self._reserve,
+                    )
+            except TimeoutError:
+                self.stats.partial = True
+            except PageBudgetExhausted:
+                self.stats.partial = True
+            except asyncio.CancelledError:
+                raise
             except ValueError:
                 self.stats.warnings.append(
                     f"{_sanitize_url(url)}: 非 HTML 内容"
@@ -97,13 +116,32 @@ class DiscoveryFetcher:
     async def fetch_rendered(
         self, url: str
     ) -> tuple[str, list[str]] | None:
-        if not self._reserve():
-            return None
         async with self.semaphore, self.host_semaphore(url):
             try:
                 import renderer
-
-                html, links = await renderer.render_page(url)
+                remaining = self.budget.remaining_seconds()
+                if remaining <= 0:
+                    self.stats.partial = True
+                    return None
+                async with asyncio.timeout(remaining):
+                    if (
+                        "reserve_request"
+                        in inspect.signature(
+                            renderer.render_page
+                        ).parameters
+                    ):
+                        html, links = await renderer.render_page(
+                            url, reserve_request=self._reserve
+                        )
+                    else:
+                        if not self._reserve():
+                            return None
+                        html, links = await renderer.render_page(url)
+            except TimeoutError:
+                self.stats.partial = True
+                return None
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 self.stats.warnings.append(
                     f"{_sanitize_url(url)}: render {type(exc).__name__}"
