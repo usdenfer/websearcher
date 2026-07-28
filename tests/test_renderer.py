@@ -80,6 +80,24 @@ def test_render_navigation_policy_allows_same_site_redirect(redirect_site):
     assert redirect_site["article"] in result.links
 
 
+def test_render_policy_blocks_direct_script_navigation_before_request(
+        redirect_site):
+    handler = redirect_site["handler"]
+    handler.render_direct_outside_requests = 0
+    start_url = redirect_site["render_script_start"]
+
+    with pytest.raises(RenderError, match="站外"):
+        asyncio.run(renderer.render_page_result(
+            start_url,
+            navigation_allowed=lambda target: same_site_boundary(
+                start_url,
+                target,
+            ),
+        ))
+
+    assert handler.render_direct_outside_requests == 0
+
+
 def test_render_pagination_collects_links(site_server):
     html, links = asyncio.run(render_page(f"{site_server}/pager.html"))
     # 第一页和翻页后第二页的文章链接都应收集到

@@ -182,6 +182,7 @@ class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
     keyword = "REDIRECT-BODY-6421"
     outside_requests = 0
     render_outside_requests = 0
+    render_direct_outside_requests = 0
 
     def do_GET(self):
         request = urlsplit(self.path)
@@ -233,6 +234,20 @@ class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if request.path == "/render-script-start":
+            self._send_html(f"""
+                <html><body><script>
+                  window.location =
+                    'http://localhost:{port}/render-direct-outside';
+                </script></body></html>
+            """)
+            return
+
+        if request.path == "/render-direct-outside":
+            type(self).render_direct_outside_requests += 1
+            self._send_html("<html><main>direct outside</main></html>")
+            return
+
         if request.path == "/render-outside":
             type(self).render_outside_requests += 1
             self._send_html("<html><main>render outside</main></html>")
@@ -276,6 +291,9 @@ def redirect_site():
             "handler": _RedirectSiteHandler,
             "render_start": (
                 f"http://127.0.0.1:{port}/render-start"
+            ),
+            "render_script_start": (
+                f"http://127.0.0.1:{port}/render-script-start"
             ),
         }
     finally:

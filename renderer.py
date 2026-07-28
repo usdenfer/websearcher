@@ -218,6 +218,14 @@ async def render_page_result(
                         and request.frame == page.main_frame
                     )
                     if is_main_document:
+                        try:
+                            direct_allowed = navigation_allowed(request.url)
+                        except Exception:
+                            direct_allowed = False
+                        if not direct_allowed:
+                            blocked_navigation = request.url
+                            await route.abort("blockedbyclient")
+                            return
                         response = await route.fetch(max_redirects=0)
                         current_url = response.url
                         current_response = response
@@ -276,6 +284,8 @@ async def render_page_result(
             if resp is not None and resp.status >= 400:
                 raise RenderError(f"HTTP {resp.status}")
             await _wait_idle(page)
+            if blocked_navigation is not None:
+                raise RenderError("重定向到站外地址")
             links = set(await _collect_links(page))
             initial_html = await page.content()
             extra, html_parts = await _harvest_pagination(page, set(links))
