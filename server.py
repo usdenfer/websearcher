@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import asdict
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,13 +29,16 @@ from ai import (AIError, ask_prompt, chat_stream, expand_keywords,
                 summarize_prompt)
 from cache import get as cache_get
 from cache import put as cache_put
+from discovery import discover_pages
 from locator import build_locate_page
-from matcher import (extract_text, extract_title, looks_js_driven,
-                     match_crawl_result, match_page)
+from matcher import (
+    extract_main_text,
+    looks_js_driven,
+    match_body_crawl_result,
+)
 
 SEARCH_BUDGET_SECONDS = 120
-RENDER_BUDGET_SECONDS = 600
-SITESEARCH_BUDGET_SECONDS = 45
+BASE_BFS_PAGE_BUDGET = 30
 AUTO_LOW_HITS = 3
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -88,10 +91,15 @@ async def index() -> FileResponse:
 
 
 async def _crawl_or_502(url: str, depth: int, render: bool,
-                        budget: int) -> CrawlResult:
+                        deadline: float) -> CrawlResult:
     try:
-        async with asyncio.timeout(budget):
-            return await crawl(url, depth=depth, render=render)
+        return await crawl(
+            url,
+            depth=depth,
+            max_pages=BASE_BFS_PAGE_BUDGET,
+            render=render,
+            deadline=deadline,
+        )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             502, f"起始页返回 HTTP {exc.response.status_code}，无法搜索")
@@ -99,16 +107,16 @@ async def _crawl_or_502(url: str, depth: int, render: bool,
         raise HTTPException(502, "起始页访问超时，无法搜索")
     except (httpx.RequestError, ValueError) as exc:
         raise HTTPException(502, f"起始页无法访问：{describe_error(exc)}")
-    except TimeoutError:
-        raise HTTPException(504, "搜索总耗时超过上限，请缩小范围或改用静态模式")
 
 
 def _match_crawl(crawl_result, all_keywords: list[str]) -> tuple[list, int]:
-    return match_crawl_result(crawl_result.pages, all_keywords)
+    return match_body_crawl_result(crawl_result.pages, all_keywords)
 
 
 @app.post("/api/search")
 async def search(req: SearchRequest) -> dict:
+    search_started = time.monotonic()
+    deadline = search_started + SEARCH_BUDGET_SECONDS
     host = urlsplit(req.startUrl).netloc
     expanded = await expand_keywords(req.keywords, host)
     all_keywords = req.keywords + [
@@ -118,11 +126,11 @@ async def search(req: SearchRequest) -> dict:
     auto_note = None
     if req.render == "on":
         crawl_result = await _crawl_or_502(
-            req.startUrl, req.depth, True, RENDER_BUDGET_SECONDS)
+            req.startUrl, req.depth, True, deadline)
         render_used = True
     else:
         crawl_result = await _crawl_or_502(
-            req.startUrl, req.depth, False, SEARCH_BUDGET_SECONDS)
+            req.startUrl, req.depth, False, deadline)
         if req.render == "auto" and crawl_result.pages:
             _, static_hits = _match_crawl(crawl_result, all_keywords)
             js_suspect = looks_js_driven(crawl_result.pages[0].html)
@@ -130,7 +138,7 @@ async def search(req: SearchRequest) -> dict:
                                     and static_hits <= AUTO_LOW_HITS):
                 try:
                     render_result = await _crawl_or_502(
-                        req.startUrl, req.depth, True, RENDER_BUDGET_SECONDS)
+                        req.startUrl, req.depth, True, deadline)
                 except HTTPException:
                     auto_note = "静态结果可能不完整，自动渲染补搜失败"
                 else:
@@ -142,17 +150,17 @@ async def search(req: SearchRequest) -> dict:
                     else:
                         auto_note = "已自动尝试渲染补搜，未发现更多结果"
 
-    site_search_info = {"available": False, "linksFound": 0,
-                        "pagesFetched": 0}
-    try:
-        async with asyncio.timeout(SITESEARCH_BUDGET_SECONDS):
-            import sitesearch
-            extra_pages, site_search_info = await sitesearch.collect_pages(
-                req.startUrl, all_keywords,
-                skip={p.url for p in crawl_result.pages})
-        crawl_result.pages.extend(extra_pages)
-    except Exception:  # noqa: BLE001 - 站内搜索只是补充通道，失败忽略
-        pass
+    discovery_run = await discover_pages(
+        req.startUrl,
+        all_keywords,
+        crawl_result,
+        req.depth,
+        req.render,
+        timeout_seconds=SEARCH_BUDGET_SECONDS,
+        started_at=search_started,
+    )
+    crawl_result.pages.extend(discovery_run.pages)
+    crawl_result.failed.extend(discovery_run.failed)
 
     results, total_hits = _match_crawl(crawl_result, all_keywords)
     response = {
@@ -163,14 +171,26 @@ async def search(req: SearchRequest) -> dict:
         "render": render_used,
         "renderMode": req.render,
         "autoNote": auto_note,
-        "siteSearch": site_search_info,
+        "discovery": discovery_run.stats.as_dict(),
+        "siteSearch": {
+            "available": (
+                "site-search"
+                in discovery_run.stats.sources_succeeded
+            ),
+            "linksFound": discovery_run.stats.candidates_found,
+            "pagesFetched": discovery_run.stats.candidates_fetched,
+            "deprecated": True,
+        },
         "pagesCrawled": len(crawl_result.pages),
         "crawledPages": [p.url for p in crawl_result.pages],
         "pagesFailed": crawl_result.failed,
         "totalHits": total_hits,
         "results": results,
     }
-    texts = {p.url: extract_text(p.html) for p in crawl_result.pages}
+    texts = {
+        p.url: extract_main_text(p.html)
+        for p in crawl_result.pages
+    }
     response["searchId"] = cache_put(response, texts)
     return response
 

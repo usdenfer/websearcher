@@ -54,8 +54,13 @@ class SearchSiteHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, ARTICLE_HTML[parsed.path].encode("utf-8"),
                        "text/html")
         elif parsed.path == "/index.html":
-            self._send(200, b"<html><body>home, no article links</body>"
-                            b"</html>", "text/html")
+            self._send(
+                200,
+                (b"<html><body>home, no article links"
+                 b"<a href='/searchN.aspx'>site search</a>"
+                 b"</body></html>"),
+                "text/html",
+            )
         else:
             self._send(404, b"not found", "text/html")
 
@@ -181,7 +186,9 @@ def test_search_api_supplements_via_site_search(search_site):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["siteSearch"]["available"] is True
-    assert data["siteSearch"]["pagesFetched"] == 3
+    assert data["siteSearch"]["pagesFetched"] >= 3
+    assert data["siteSearch"]["deprecated"] is True
+    assert "discovery" in data
     urls = {r["pageUrl"] for r in data["results"]}
     assert {f"{search_site}/a1.html", f"{search_site}/a2.html",
             f"{search_site}/a3.html"} <= urls

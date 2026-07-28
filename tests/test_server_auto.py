@@ -67,7 +67,8 @@ def test_auto_keeps_static_when_hits_found(monkeypatch, site_server):
     assert data["totalHits"] >= 1
 
 
-def test_auto_escalates_on_js_driven_few_hits(monkeypatch, site_server):
+def test_auto_keeps_static_when_render_has_no_more_body_hits(
+        monkeypatch, site_server):
     calls = _install(
         monkeypatch,
         JS_HTML.replace("</body>", "<p>alpha</p></body>"),
@@ -75,8 +76,9 @@ def test_auto_escalates_on_js_driven_few_hits(monkeypatch, site_server):
         "<a href='x.html' title='alpha 链接'>x</a></body></html>")
     data = _post(site_server).json()
     assert calls == [False, True]
-    assert data["render"] is True
-    assert data["totalHits"] >= 3
+    assert data["render"] is False
+    assert data["totalHits"] == 1
+    assert data["autoNote"]
 
 
 def test_auto_keeps_static_when_render_not_better(monkeypatch, site_server):

@@ -1,5 +1,6 @@
 """crawler.py 的单元测试：链接提取、规范化、并发抓取与失败记录。"""
 import asyncio
+import time
 from pathlib import Path
 
 import httpx
@@ -85,6 +86,51 @@ def test_crawl_respects_max_pages(site_server):
                                depth=3, max_pages=2))
     assert len(result.pages) == 2
     assert result.pages[0].url.endswith("/index.html")
+
+
+def test_crawl_deadline_keeps_completed_pages(monkeypatch):
+    import crawler
+
+    async def fake_fetch(client, url, **kwargs):
+        if url.endswith("/index.html"):
+            return ("<html><body><a href='/slow.html'>slow</a>"
+                    "<a href='/fast.html'>fast</a></body></html>")
+        if url.endswith("/slow.html"):
+            await asyncio.sleep(1)
+        return f"<html><main>{url}</main></html>"
+
+    monkeypatch.setattr(crawler, "fetch_html_retry", fake_fetch)
+    started = time.monotonic()
+    result = asyncio.run(crawl(
+        "https://deadline.test/index.html",
+        depth=1,
+        deadline=started + 0.1,
+    ))
+    assert time.monotonic() - started < 0.8
+    assert result.pages[0].url.endswith("/index.html")
+    assert any(page.url.endswith("/fast.html") for page in result.pages)
+    assert not any(page.url.endswith("/slow.html") for page in result.pages)
+
+
+def test_render_crawl_forwards_max_pages_and_deadline(monkeypatch):
+    import crawler
+
+    calls = []
+
+    async def fake_render(url, depth, max_pages, deadline):
+        calls.append((url, depth, max_pages, deadline))
+        return crawler.CrawlResult()
+
+    monkeypatch.setattr(crawler, "_crawl_render", fake_render)
+    deadline = time.monotonic() + 10
+    asyncio.run(crawl(
+        "https://render.test/",
+        depth=3,
+        max_pages=17,
+        render=True,
+        deadline=deadline,
+    ))
+    assert calls == [("https://render.test/", 3, 17, deadline)]
 
 
 def test_constants():

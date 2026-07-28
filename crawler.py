@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
@@ -172,9 +173,41 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
     raise last_exc  # type: ignore[misc]
 
 
+async def gather_before_deadline(coroutines, deadline: float | None):
+    """Gather completed work and cooperatively cancel work past a deadline."""
+    tasks = [asyncio.create_task(item) for item in coroutines]
+    if not tasks:
+        return [], False
+    timeout = (
+        None
+        if deadline is None
+        else max(0.0, deadline - time.monotonic())
+    )
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    results = [
+        task.result()
+        for task in tasks
+        if task in done
+        and not task.cancelled()
+        and task.exception() is None
+    ]
+    return results, bool(pending)
+
+
 async def crawl(start_url: str, depth: int = 1,
                 max_pages: int = MAX_TOTAL_PAGES,
-                render: bool = False) -> CrawlResult:
+                render: bool = False,
+                deadline: float | None = None) -> CrawlResult:
     """Fetch start page and its same-site pages level by level (BFS).
 
     depth=1 crawls the start page plus pages it directly links to;
@@ -187,7 +220,12 @@ async def crawl(start_url: str, depth: int = 1,
     RENDER_MAX_PAGES。
     """
     if render:
-        return await _crawl_render(start_url, depth)
+        return await _crawl_render(
+            start_url,
+            depth,
+            max_pages=max_pages,
+            deadline=deadline,
+        )
     result = CrawlResult()
     async with httpx.AsyncClient(
         timeout=PAGE_TIMEOUT,
@@ -225,15 +263,20 @@ async def crawl(start_url: str, depth: int = 1,
             candidates = candidates[:remaining]
             if not candidates:
                 break
-            fetched = await asyncio.gather(
-                *(fetch_one(u) for u in candidates))
+            fetched, deadline_reached = await gather_before_deadline(
+                (fetch_one(u) for u in candidates),
+                deadline,
+            )
             current_level = [p for p in fetched if p is not None]
             result.pages.extend(current_level)
+            if deadline_reached:
+                break
     return result
 
 
 async def _crawl_render(start_url: str, depth: int,
-                        max_pages: int = RENDER_MAX_PAGES) -> CrawlResult:
+                        max_pages: int = RENDER_MAX_PAGES,
+                        deadline: float | None = None) -> CrawlResult:
     """BFS over rendered pages: links come from the live DOM (including
     pagination harvest), so JS-injected list items are discoverable."""
     import renderer
@@ -288,7 +331,10 @@ async def _crawl_render(start_url: str, depth: int,
                         return None
                     return CrawledPage(url=url, html=html)
 
-            fetched = await asyncio.gather(*(fetch_one(url) for url in urls))
+            fetched, _deadline_reached = await gather_before_deadline(
+                (fetch_one(url) for url in urls),
+                deadline,
+            )
         return [page for page in fetched if page is not None]
 
     remaining = max_pages - len(result.pages)
@@ -303,10 +349,14 @@ async def _crawl_render(start_url: str, depth: int,
         visited.add(normalized)
         discovery_hubs.append(normalized)
 
-    rendered_hubs = await asyncio.gather(
-        *(render_one(url) for url in discovery_hubs))
+    rendered_hubs, hubs_deadline_reached = await gather_before_deadline(
+        (render_one(url) for url in discovery_hubs),
+        deadline,
+    )
     successful_hubs = [item for item in rendered_hubs if item is not None]
     result.pages.extend(page for page, _links in successful_hubs)
+    if hubs_deadline_reached:
+        return result
 
     discovery_articles: list[str] = []
     reserved_discovery_articles: set[str] = set()
@@ -328,6 +378,8 @@ async def _crawl_render(start_url: str, depth: int,
     static_articles = await fetch_static_articles(discovery_articles)
     visited.update(normalize_url(page.url) for page in static_articles)
     result.pages.extend(static_articles)
+    if deadline is not None and time.monotonic() >= deadline:
+        return result
 
     for _level in range(depth):
         remaining = max_pages - len(result.pages)
@@ -346,14 +398,16 @@ async def _crawl_render(start_url: str, depth: int,
                 candidates.append(normalized)
                 per_page += 1
         candidates = candidates[:remaining]
-        fetched = await asyncio.gather(
-            *(render_one(u) for u in candidates))
+        fetched, deadline_reached = await gather_before_deadline(
+            (render_one(u) for u in candidates),
+            deadline,
+        )
         ok = [item for item in fetched if item is not None]
         current_level = [(p.url, links) for p, links in ok]
         if _level == 0:
             current_level.extend(
                 (page.url, links) for page, links in successful_hubs)
         result.pages.extend(p for p, _links in ok)
-        if not current_level:
+        if deadline_reached or not current_level:
             break
     return result
