@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,7 +21,6 @@ from urllib.parse import urlsplit
 JOBS_FILE = Path(__file__).parent / "data" / "jobs.json"
 STATIC_BUDGET_SECONDS = 120
 RENDER_BUDGET_SECONDS = 600
-SITESEARCH_BUDGET_SECONDS = 45
 AUTO_LOW_HITS = 3
 MAX_HIT_KEYS = 500
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -192,18 +192,19 @@ async def run_job(store: JobStore, job_id: str,
         all_keywords = job["keywords"] + [
             k for k in expanded if k not in job["keywords"]]
 
+        search_started = time.monotonic()
         render_used = False
         mode = job.get("render", "auto")
         budget = (RENDER_BUDGET_SECONDS if mode == "on"
                   else STATIC_BUDGET_SECONDS)
         try:
             if mode == "on":
-                async with asyncio.timeout(RENDER_BUDGET_SECONDS):
+                async with asyncio.timeout(budget):
                     crawl_result = await crawl_fn(
                         job["startUrl"], depth=job["depth"], render=True)
                 render_used = True
             else:
-                async with asyncio.timeout(STATIC_BUDGET_SECONDS):
+                async with asyncio.timeout(budget):
                     crawl_result = await crawl_fn(
                         job["startUrl"], depth=job["depth"], render=False)
                 if mode == "auto" and crawl_result.pages:
@@ -234,14 +235,15 @@ async def run_job(store: JobStore, job_id: str,
         from discovery.urltools import normalize_candidate_url
         from matcher import match_body_crawl_result
         try:
-            async with asyncio.timeout(SITESEARCH_BUDGET_SECONDS):
-                discovery_run = await discovery_fn(
-                    job["startUrl"],
-                    all_keywords,
-                    crawl_result,
-                    job["depth"],
-                    mode,
-                )
+            discovery_run = await discovery_fn(
+                job["startUrl"],
+                all_keywords,
+                crawl_result,
+                job["depth"],
+                mode,
+                timeout_seconds=budget,
+                started_at=search_started,
+            )
             seen = {
                 normalize_candidate_url(page.url)
                 for page in crawl_result.pages
@@ -253,6 +255,8 @@ async def run_job(store: JobStore, job_id: str,
                 seen.add(normalized)
                 crawl_result.pages.append(page)
             crawl_result.failed.extend(discovery_run.failed)
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001 - 站内搜索失败不影响任务
             pass
         results, total_hits = match_body_crawl_result(

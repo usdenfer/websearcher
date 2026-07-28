@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -141,6 +142,7 @@ async def discover_pages(
     render_mode: str,
     timeout_seconds: float = 120.0,
     started_at: float | None = None,
+    skip_urls: Iterable[str] = (),
 ) -> DiscoveryRun:
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
@@ -233,6 +235,10 @@ async def discover_pages(
             normalize_candidate_url(page.url)
             for page in base_result.pages
         }
+        visited.update(
+            normalize_candidate_url(url)
+            for url in skip_urls
+        )
         pending = [item for item in ranked if item.url not in visited]
         stats.candidates_found = len(pending)
         pages: list[CrawledPage] = []

@@ -123,9 +123,11 @@ def test_collect_pages_delegates_to_discovery_and_normalizes_skip(monkeypatch):
         calls["crawl"] = (url, kwargs)
         return base
 
-    async def fake_discover(url, keywords, base_result, depth, render_mode):
+    async def fake_discover(
+        url, keywords, base_result, depth, render_mode, **kwargs,
+    ):
         calls["discover"] = (
-            url, keywords, base_result, depth, render_mode,
+            url, keywords, base_result, depth, render_mode, kwargs,
         )
         return DiscoveryRun(
             pages=[
@@ -141,7 +143,7 @@ def test_collect_pages_delegates_to_discovery_and_normalizes_skip(monkeypatch):
             failed=[],
             stats=DiscoveryStats(
                 sources_succeeded={"site-search"},
-                candidates_found=2,
+                candidates_found=1,
             ),
         )
 
@@ -159,13 +161,14 @@ def test_collect_pages_delegates_to_discovery_and_normalizes_skip(monkeypatch):
     )
     assert calls["discover"] == (
         "https://x.test/", ["alpha"], base, 1, "off",
+        {"skip_urls": {"https://x.test/old?utm_campaign=seen"}},
     )
     assert [page.url for page in pages] == [
         "https://x.test/new.html",
     ]
     assert info == {
         "available": True,
-        "linksFound": 2,
+        "linksFound": 1,
         "pagesFetched": 1,
         "deprecated": True,
     }
@@ -307,7 +310,9 @@ def test_run_job_supplements_via_discovery_fn(tmp_path):
     async def fake_expand(kw, host):
         return []
 
-    async def fake_discovery(url, keywords, base_result, depth, render_mode):
+    async def fake_discovery(
+        url, keywords, base_result, depth, render_mode, **kwargs,
+    ):
         assert base_result.pages[0].url == "https://x.test/"
         return DiscoveryRun(
             pages=[CrawledPage(

@@ -143,7 +143,9 @@ def test_run_job_and_new_hits(tmp_path, monkeypatch):
     assert r3["newHits"] == 1
 
 
-def test_run_job_reuses_base_and_deduplicates_discovery_pages(tmp_path):
+def test_run_job_reuses_base_and_deduplicates_discovery_pages(
+    tmp_path, monkeypatch,
+):
     store = jobs.JobStore(tmp_path / "jobs.json")
     store.add(_job(
         {"kind": "daily", "time": "09:30"},
@@ -156,6 +158,14 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(tmp_path):
         ),
     ])
     calls = {}
+    timeout_calls = []
+    real_timeout = asyncio.timeout
+
+    def tracking_timeout(seconds):
+        timeout_calls.append(seconds)
+        return real_timeout(seconds)
+
+    monkeypatch.setattr(jobs.asyncio, "timeout", tracking_timeout)
 
     async def fake_crawl(url, **kwargs):
         return base
@@ -164,10 +174,11 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(tmp_path):
         return []
 
     async def fake_discovery(
-        url, keywords, base_result, depth, render_mode,
+        url, keywords, base_result, depth, render_mode, **kwargs,
     ):
         calls["base"] = base_result
         calls["args"] = (url, keywords, depth, render_mode)
+        calls["kwargs"] = kwargs
         return DiscoveryRun(
             pages=[
                 CrawledPage(
@@ -180,7 +191,7 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(tmp_path):
                 ),
             ],
             failed=[{"url": "https://x.test/bad", "reason": "HTTP 500"}],
-            stats=DiscoveryStats(),
+            stats=DiscoveryStats(partial=True),
         )
 
     result = asyncio.run(jobs.run_job(
@@ -195,6 +206,11 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(tmp_path):
     assert calls["args"] == (
         "https://x.test/", ["alpha"], 1, "off",
     )
+    assert calls["kwargs"]["timeout_seconds"] == (
+        jobs.STATIC_BUDGET_SECONDS
+    )
+    assert isinstance(calls["kwargs"]["started_at"], float)
+    assert timeout_calls == [jobs.STATIC_BUDGET_SECONDS]
     assert result["pagesCrawled"] == 2
     assert result["totalHits"] == 2
     assert base.failed == [

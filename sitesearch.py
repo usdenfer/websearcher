@@ -136,7 +136,7 @@ async def collect_pages(start_url: str, keywords: list[str],
 
     try:
         run = await discover_pages(
-            start_url, keywords, base, 1, "off",
+            start_url, keywords, base, 1, "off", skip_urls=skip,
         )
     except asyncio.CancelledError:
         raise

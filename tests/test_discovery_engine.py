@@ -510,6 +510,44 @@ def test_discover_pages_excludes_visited_normalized_urls(monkeypatch):
     assert fetchers[0].urls == [fresh.url]
 
 
+def test_skip_urls_are_not_fetched_or_charged_to_html_budget(monkeypatch):
+    skipped = Candidate(
+        "https://x.test/a/?utm_source=provider",
+        "sitemap",
+        score=90,
+    )
+    fresh = Candidate("https://x.test/b", "sitemap", score=55)
+    _context, _providers, fetchers = _install_engine_fakes(
+        monkeypatch,
+        batches={"sitemap": [skipped, fresh]},
+    )
+
+    result = _run(
+        discover_pages(
+            "https://x.test/",
+            ["alpha"],
+            CrawlResult(
+                pages=[
+                    CrawledPage(
+                        "https://x.test/",
+                        "<html>home</html>",
+                    )
+                ]
+            ),
+            depth=1,
+            render_mode="off",
+            skip_urls={
+                "https://x.test/a?utm_campaign=legacy#seen",
+            },
+        )
+    )
+
+    assert [page.url for page in result.pages] == [fresh.url]
+    assert result.stats.candidates_found == 1
+    assert fetchers[0].urls == [fresh.url]
+    assert fetchers[0].budget.used_html_pages == 2
+
+
 def test_live_budget_after_providers_controls_initial_and_expanded_fetches(
     monkeypatch,
 ):
