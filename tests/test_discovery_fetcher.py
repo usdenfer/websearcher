@@ -142,11 +142,22 @@ def test_host_semaphore_uses_canonical_host_and_effective_port():
             http_implicit = fetcher.host_semaphore("http://EXAMPLE.test/")
             ipv6_default = fetcher.host_semaphore("https://[::1]:443/a")
             ipv6_implicit = fetcher.host_semaphore("https://[::1]/b")
+            ipv6_expanded = fetcher.host_semaphore(
+                "https://[0:0:0:0:0:0:0:1]/c"
+            )
+            unicode_host = fetcher.host_semaphore(
+                "https://例子.测试/a"
+            )
+            punycode_host = fetcher.host_semaphore(
+                "https://xn--fsqu00a.xn--0zwm56d/b"
+            )
             malformed = fetcher.host_semaphore("http://[invalid")
 
         assert https_default is https_implicit
         assert http_default is http_implicit
         assert ipv6_default is ipv6_implicit
+        assert ipv6_default is ipv6_expanded
+        assert unicode_host is punycode_host
         assert https_non_default is not https_default
         assert http_default is not https_default
         assert malformed is fetcher.host_semaphore("http://[invalid")
