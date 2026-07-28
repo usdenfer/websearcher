@@ -1,0 +1,14 @@
+<html><body>
+  <main>
+    <article><a href="/news/1.html">普通标题</a></article>
+    <article><a href="/news/2.html">正文标记对应页面</a></article>
+    <article><a href="/news/2.html#duplicate">重复标题</a></article>
+    <article><a href="http://[invalid">畸形链接</a></article>
+  </main>
+  <nav class="pagination">
+    <a href="?keyword=alpha&page=2">下一页</a>
+    <a href="?page=3&keyword=alpha">3</a>
+    <a href="https://outside.test/search?page=4">4</a>
+    <a href="http://[invalid">»</a>
+  </nav>
+</body></html>
