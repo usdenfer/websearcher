@@ -169,15 +169,15 @@ class JobStore:
 
 
 async def run_job(store: JobStore, job_id: str,
-                  crawl_fn=None, expand_fn=None, sitesearch_fn=None) -> dict:
+                  crawl_fn=None, expand_fn=None, discovery_fn=None) -> dict:
     """Execute one scheduled search. Returns a compact run summary;
     job record is updated in the store either way."""
     if crawl_fn is None:
         from crawler import crawl as crawl_fn
     if expand_fn is None:
         from ai import expand_keywords as expand_fn
-    if sitesearch_fn is None:
-        from sitesearch import collect_pages as sitesearch_fn
+    if discovery_fn is None:
+        from discovery import discover_pages as discovery_fn
 
     job = store.get(job_id)
     if job is None:
@@ -207,8 +207,11 @@ async def run_job(store: JobStore, job_id: str,
                     crawl_result = await crawl_fn(
                         job["startUrl"], depth=job["depth"], render=False)
                 if mode == "auto" and crawl_result.pages:
-                    from matcher import looks_js_driven, match_crawl_result
-                    _, static_hits = match_crawl_result(
+                    from matcher import (
+                        looks_js_driven,
+                        match_body_crawl_result,
+                    )
+                    _, static_hits = match_body_crawl_result(
                         crawl_result.pages, all_keywords)
                     if static_hits == 0 or (
                             looks_js_driven(crawl_result.pages[0].html)
@@ -217,7 +220,7 @@ async def run_job(store: JobStore, job_id: str,
                             render_result = await crawl_fn(
                                 job["startUrl"], depth=job["depth"],
                                 render=True)
-                        _, render_hits = match_crawl_result(
+                        _, render_hits = match_body_crawl_result(
                             render_result.pages, all_keywords)
                         if render_hits > static_hits:
                             crawl_result = render_result
@@ -228,16 +231,31 @@ async def run_job(store: JobStore, job_id: str,
             job["lastRunAt"] = datetime.now().isoformat(timespec="seconds")
             return {"error": error}
 
-        from matcher import match_crawl_result
+        from discovery.urltools import normalize_candidate_url
+        from matcher import match_body_crawl_result
         try:
             async with asyncio.timeout(SITESEARCH_BUDGET_SECONDS):
-                extra_pages, _ss_info = await sitesearch_fn(
-                    job["startUrl"], all_keywords,
-                    skip={p.url for p in crawl_result.pages})
-            crawl_result.pages.extend(extra_pages)
+                discovery_run = await discovery_fn(
+                    job["startUrl"],
+                    all_keywords,
+                    crawl_result,
+                    job["depth"],
+                    mode,
+                )
+            seen = {
+                normalize_candidate_url(page.url)
+                for page in crawl_result.pages
+            }
+            for page in discovery_run.pages:
+                normalized = normalize_candidate_url(page.url)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                crawl_result.pages.append(page)
+            crawl_result.failed.extend(discovery_run.failed)
         except Exception:  # noqa: BLE001 - 站内搜索失败不影响任务
             pass
-        results, total_hits = match_crawl_result(
+        results, total_hits = match_body_crawl_result(
             crawl_result.pages, all_keywords)
         keys = hit_keys(results)
         prev = set(job.get("prevKeys") or [])
