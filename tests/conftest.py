@@ -177,9 +177,10 @@ def discovery_site():
 
 
 class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
-    """Redirect localhost to 127.0.0.1 and serve relative content there."""
+    """Serve same-authority redirects and an attempted cross-host escape."""
 
     keyword = "REDIRECT-BODY-6421"
+    outside_requests = 0
 
     def do_GET(self):
         request = urlsplit(self.path)
@@ -223,6 +224,7 @@ class _RedirectSiteHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if request.path == "/outside":
+            type(self).outside_requests += 1
             self._send_html("<html><main>outside</main></html>")
             return
 
@@ -251,11 +253,12 @@ def redirect_site():
     try:
         port = server.server_address[1]
         yield {
-            "start": f"http://localhost:{port}/start",
+            "start": f"http://127.0.0.1:{port}/start",
             "home": f"http://127.0.0.1:{port}/home/",
             "article": f"http://127.0.0.1:{port}/home/article",
             "escape": f"http://127.0.0.1:{port}/home/escape",
             "keyword": _RedirectSiteHandler.keyword,
+            "handler": _RedirectSiteHandler,
         }
     finally:
         server.shutdown()

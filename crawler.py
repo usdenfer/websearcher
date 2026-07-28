@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
 
-from discovery.urltools import normalize_candidate_url
+from discovery.urltools import (
+    canonical_authority,
+    normalize_candidate_url,
+    same_site_boundary,
+)
 
 MAX_SUBPAGES = 30
 MAX_TOTAL_PAGES = 60
@@ -41,6 +46,16 @@ class CrawledPage:
 class FetchedHtml:
     html: str
     final_url: str
+
+
+@dataclass(frozen=True)
+class _CrawlHttpContext:
+    client: httpx.AsyncClient
+    redirect_allowed: Callable[[str], bool]
+
+
+class UnsafeRedirect(ValueError):
+    """A crawl redirect attempted to leave its permitted site boundary."""
 
 
 @dataclass
@@ -162,6 +177,66 @@ async def fetch_html(client: httpx.AsyncClient, url: str) -> str:
 RETRYABLE_TRANSPORT = (httpx.ConnectError, httpx.RemoteProtocolError,
                        httpx.ReadError, httpx.ConnectTimeout,
                        httpx.ReadTimeout, httpx.PoolTimeout)
+
+MAX_REDIRECT_HOPS = 10
+
+
+def _html_from_response(response: httpx.Response) -> FetchedHtml:
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    if "html" not in content_type.lower():
+        raise ValueError(f"非 HTML 内容 ({content_type or '未知类型'})")
+    return FetchedHtml(response.text, str(response.url))
+
+
+async def _fetch_html_manual_redirect(
+    context: _CrawlHttpContext,
+    url: str,
+) -> FetchedHtml:
+    current_url = url
+    for _hop in range(MAX_REDIRECT_HOPS + 1):
+        response = await context.client.get(
+            current_url,
+            follow_redirects=False,
+        )
+        if response.is_redirect and response.headers.get("location"):
+            next_url = urljoin(
+                str(response.url),
+                response.headers["location"],
+            )
+            if not context.redirect_allowed(next_url):
+                raise UnsafeRedirect("重定向到站外地址")
+            current_url = next_url
+            continue
+        return _html_from_response(response)
+    raise httpx.TooManyRedirects(
+        "重定向次数过多",
+        request=httpx.Request("GET", current_url),
+    )
+
+
+async def _fetch_crawl_html_retry(
+    client: _CrawlHttpContext,
+    url: str,
+    attempts: int = 4,
+    base_delay: float = 1.5,
+) -> FetchedHtml:
+    """Crawl-only retry path with redirect validation before each next hop."""
+    delay = base_delay
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return await _fetch_html_manual_redirect(client, url)
+        except RETRYABLE_TRANSPORT as exc:
+            last_exc = exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                raise
+            last_exc = exc
+        if attempt < attempts - 1:
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise last_exc  # type: ignore[misc]
 
 
 async def fetch_html_retry(client: httpx.AsyncClient, url: str,
@@ -286,8 +361,17 @@ async def crawl(start_url: str, depth: int = 1,
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT},
     ) as client:
+        start_context = _CrawlHttpContext(
+            client,
+            lambda target: same_site_boundary(start_url, target),
+        )
         start_value, deadline_reached = await await_before_deadline(
-            fetch_html_retry(client, start_url, include_final_url=True),
+            _fetch_crawl_html_retry(
+                start_context,
+                start_url,
+                4,
+                1.5,
+            ),
             deadline,
         )
         if deadline_reached:
@@ -302,43 +386,49 @@ async def crawl(start_url: str, depth: int = 1,
             html=start_fetched.html,
         )
         result.pages.append(start_page)
-        effective_netloc = urlsplit(start_page.url).netloc.lower()
+        effective_authority = canonical_authority(start_page.url)
+        if effective_authority is None:
+            raise ValueError("重定向后的地址无效")
+        child_context = _CrawlHttpContext(
+            client,
+            lambda target: canonical_authority(target) == effective_authority,
+        )
         visited = {
             normalize_url(start_url),
             normalize_url(start_page.url),
         }
         stored_pages = {normalize_url(start_page.url)}
+        attempted_pages = 1
         current_level = [start_page]
         semaphore = asyncio.Semaphore(CONCURRENCY)
 
         async def fetch_one(url: str) -> CrawledPage | None:
             async with semaphore:
                 try:
-                    value = await fetch_html_retry(
-                        client,
+                    value = await _fetch_crawl_html_retry(
+                        child_context,
                         url,
-                        attempts=2,
-                        base_delay=1.0,
-                        include_final_url=True,
+                        2,
+                        1.0,
                     )
-                except Exception as exc:  # noqa: BLE001 - collected, not raised
-                    result.failed.append(
-                        {"url": url, "reason": describe_error(exc)})
-                    return None
-                fetched = _as_fetched_html(value, url)
-                if urlsplit(fetched.final_url).netloc.lower() != effective_netloc:
+                except UnsafeRedirect:
                     result.failed.append({
                         "url": url,
                         "reason": "重定向到站外地址",
                     })
                     return None
+                except Exception as exc:  # noqa: BLE001 - collected, not raised
+                    result.failed.append(
+                        {"url": url, "reason": describe_error(exc)})
+                    return None
+                fetched = _as_fetched_html(value, url)
                 return CrawledPage(
                     url=fetched.final_url,
                     html=fetched.html,
                 )
 
         for _level in range(depth):
-            remaining = max_pages - len(result.pages)
+            remaining = max_pages - attempted_pages
             if remaining <= 0:
                 break
             candidates: list[str] = []
@@ -350,6 +440,7 @@ async def crawl(start_url: str, depth: int = 1,
             candidates = candidates[:remaining]
             if not candidates:
                 break
+            attempted_pages += len(candidates)
             fetched, deadline_reached = await gather_before_deadline(
                 (fetch_one(u) for u in candidates),
                 deadline,
@@ -378,23 +469,24 @@ async def _crawl_render(start_url: str, depth: int,
     import renderer
 
     result = CrawlResult()
-    start_host = urlsplit(start_url).netloc.lower()
     start_norm = normalize_url(start_url)
+    effective_authority: tuple[str, int] | None = None
 
-    def usable(link: str) -> str | None:
-        parts = urlsplit(link)
+    def usable(link: str, base_url: str) -> str | None:
+        absolute = urljoin(base_url, link)
+        parts = urlsplit(absolute)
         if parts.scheme not in ("http", "https"):
             return None
-        if parts.netloc.lower() != start_host:
+        if canonical_authority(absolute) != effective_authority:
             return None
-        normalized = normalize_url(link)
+        normalized = normalize_url(absolute)
         if normalized == start_norm or is_binary_url(normalized):
             return None
         return normalized
 
     try:
         start_loaded, deadline_reached = await await_before_deadline(
-            renderer.render_page(start_url),
+            renderer.render_page_result(start_url),
             deadline,
         )
     except renderer.RenderError as exc:
@@ -405,19 +497,41 @@ async def _crawl_render(start_url: str, depth: int,
             "reason": "搜索截止时间已到",
         })
         return result
-    start_html, start_links = start_loaded
-    result.pages.append(CrawledPage(url=start_url, html=start_html))
-    visited = {start_norm}
-    current_level: list[tuple[str, list[str]]] = [(start_url, start_links)]
+    if not same_site_boundary(start_url, start_loaded.final_url):
+        raise ValueError("重定向到站外地址")
+    effective_authority = canonical_authority(start_loaded.final_url)
+    if effective_authority is None:
+        raise ValueError("重定向后的地址无效")
+    start_page = CrawledPage(
+        url=start_loaded.final_url,
+        html=start_loaded.html,
+    )
+    start_links = start_loaded.links
+    start_norm = normalize_url(start_page.url)
+    result.pages.append(start_page)
+    visited = {normalize_url(start_url), start_norm}
+    attempted_pages = 1
+    current_level: list[tuple[str, list[str]]] = [
+        (start_page.url, start_links)
+    ]
 
     async def render_one(url: str):
         try:
-            html, links = await renderer.render_page(url)
+            rendered = await renderer.render_page_result(url)
         except Exception as exc:  # noqa: BLE001 - collected, not raised
             result.failed.append(
                 {"url": url, "reason": describe_error(exc)})
             return None
-        return CrawledPage(url=url, html=html), links
+        if canonical_authority(rendered.final_url) != effective_authority:
+            result.failed.append({
+                "url": url,
+                "reason": "重定向到站外地址",
+            })
+            return None
+        return (
+            CrawledPage(url=rendered.final_url, html=rendered.html),
+            rendered.links,
+        )
 
     async def fetch_static_articles(urls: list[str]) -> list[CrawledPage]:
         semaphore = asyncio.Semaphore(CONCURRENCY)
@@ -426,16 +540,37 @@ async def _crawl_render(start_url: str, depth: int,
             follow_redirects=True,
             headers={"User-Agent": USER_AGENT},
         ) as client:
+            static_context = _CrawlHttpContext(
+                client,
+                lambda target: (
+                    canonical_authority(target) == effective_authority
+                ),
+            )
+
             async def fetch_one(url: str) -> CrawledPage | None:
                 async with semaphore:
                     try:
-                        html = await fetch_html_retry(
-                            client, url, attempts=2, base_delay=1.0)
+                        value = await _fetch_crawl_html_retry(
+                            static_context,
+                            url,
+                            2,
+                            1.0,
+                        )
+                    except UnsafeRedirect:
+                        result.failed.append({
+                            "url": url,
+                            "reason": "重定向到站外地址",
+                        })
+                        return None
                     except Exception as exc:  # noqa: BLE001 - collected, not raised
                         result.failed.append(
                             {"url": url, "reason": describe_error(exc)})
                         return None
-                    return CrawledPage(url=url, html=html)
+                    fetched = _as_fetched_html(value, url)
+                    return CrawledPage(
+                        url=fetched.final_url,
+                        html=fetched.html,
+                    )
 
             fetched, _deadline_reached = await gather_before_deadline(
                 (fetch_one(url) for url in urls),
@@ -443,17 +578,18 @@ async def _crawl_render(start_url: str, depth: int,
             )
         return [page for page in fetched if page is not None]
 
-    remaining = max_pages - len(result.pages)
+    remaining = max_pages - attempted_pages
     discovery_hubs: list[str] = []
     for link in prioritize_render_links(start_links):
         if len(discovery_hubs) >= min(RENDER_DISCOVERY_HUBS, remaining):
             break
-        normalized = usable(link)
+        normalized = usable(link, start_page.url)
         if (normalized is None or normalized in visited
                 or not is_render_discovery_hub(normalized)):
             continue
         visited.add(normalized)
         discovery_hubs.append(normalized)
+    attempted_pages += len(discovery_hubs)
 
     rendered_hubs, hubs_deadline_reached = await gather_before_deadline(
         (render_one(url) for url in discovery_hubs),
@@ -466,14 +602,14 @@ async def _crawl_render(start_url: str, depth: int,
 
     discovery_articles: list[str] = []
     reserved_discovery_articles: set[str] = set()
-    remaining = max_pages - len(result.pages)
-    for _hub_page, hub_links in successful_hubs:
+    remaining = max_pages - attempted_pages
+    for hub_page, hub_links in successful_hubs:
         per_hub = 0
         for link in prioritize_render_links(hub_links):
             if (per_hub >= RENDER_DISCOVERY_ARTICLES_PER_HUB
                     or len(discovery_articles) >= remaining):
                 break
-            normalized = usable(link)
+            normalized = usable(link, hub_page.url)
             if (normalized is None or normalized in visited
                     or normalized in reserved_discovery_articles
                     or not is_render_article_link(normalized)):
@@ -481,6 +617,7 @@ async def _crawl_render(start_url: str, depth: int,
             reserved_discovery_articles.add(normalized)
             discovery_articles.append(normalized)
             per_hub += 1
+    attempted_pages += len(discovery_articles)
     static_articles = await fetch_static_articles(discovery_articles)
     visited.update(normalize_url(page.url) for page in static_articles)
     result.pages.extend(static_articles)
@@ -488,22 +625,23 @@ async def _crawl_render(start_url: str, depth: int,
         return result
 
     for _level in range(depth):
-        remaining = max_pages - len(result.pages)
+        remaining = max_pages - attempted_pages
         if remaining <= 0:
             break
         candidates: list[str] = []
-        for _page_url, links in current_level:
+        for page_url, links in current_level:
             per_page = 0
             for link in links:
                 if per_page >= RENDER_SUBPAGE_LINKS:
                     break
-                normalized = usable(link)
+                normalized = usable(link, page_url)
                 if normalized is None or normalized in visited:
                     continue
                 visited.add(normalized)
                 candidates.append(normalized)
                 per_page += 1
         candidates = candidates[:remaining]
+        attempted_pages += len(candidates)
         fetched, deadline_reached = await gather_before_deadline(
             (render_one(u) for u in candidates),
             deadline,

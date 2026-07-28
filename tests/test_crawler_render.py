@@ -35,8 +35,13 @@ async def _fake_render(url):
     return RENDERED[url]
 
 
+async def _fake_render_result(url):
+    html, links = await _fake_render(url)
+    return renderer.RenderedPage(html, links, url)
+
+
 def _crawl(monkeypatch, depth=1, start=BASE):
-    monkeypatch.setattr(renderer, "render_page", _fake_render)
+    monkeypatch.setattr(renderer, "render_page_result", _fake_render_result)
     return asyncio.run(crawler.crawl(start, depth=depth, render=True))
 
 
@@ -50,6 +55,38 @@ def test_render_crawl_follows_rendered_links(monkeypatch):
     assert "http://example.test/a2" in urls
 
 
+def test_render_crawl_uses_final_url_as_effective_root(monkeypatch):
+    final_home = "https://www.example.test/home/"
+    article = "https://www.example.test/home/article"
+
+    async def fake_result(url):
+        if url == BASE:
+            return renderer.RenderedPage(
+                "<html><body>redirected</body></html>",
+                [article, "https://evil.test/out"],
+                final_home,
+            )
+        if url == article:
+            return renderer.RenderedPage(
+                "<html><article>body</article></html>",
+                [],
+                article,
+            )
+        raise AssertionError(f"unexpected render request: {url}")
+
+    async def old_api_must_not_drive_crawler(url):
+        raise AssertionError(f"legacy render API used for {url}")
+
+    monkeypatch.setattr(
+        renderer, "render_page_result", fake_result, raising=False
+    )
+    monkeypatch.setattr(renderer, "render_page", old_api_must_not_drive_crawler)
+
+    result = asyncio.run(crawler.crawl(BASE, depth=1, render=True))
+
+    assert [page.url for page in result.pages] == [final_home, article]
+
+
 def test_render_crawl_depth1_only_first_level(monkeypatch):
     result = _crawl(monkeypatch, depth=1)
     urls = [p.url for p in result.pages]
@@ -61,8 +98,8 @@ def test_render_crawl_collects_failures(monkeypatch):
     async def flaky(url):
         if url.endswith("/nav"):
             raise renderer.RenderError("页面加载失败：boom")
-        return await _fake_render(url)
-    monkeypatch.setattr(renderer, "render_page", flaky)
+        return await _fake_render_result(url)
+    monkeypatch.setattr(renderer, "render_page_result", flaky)
     result = asyncio.run(crawler.crawl(BASE, depth=1, render=True))
     assert any(f["url"].endswith("/nav") and "boom" in f["reason"]
                for f in result.failed)
@@ -137,15 +174,20 @@ def _dynamic_discovery_crawl(monkeypatch, *, target_on_start=False, depth=1):
     }
 
     async def fake_render(url):
-        return rendered.get(url, ("<html><body>普通页面</body></html>", []))
+        html, links = rendered.get(
+            url, ("<html><body>普通页面</body></html>", [])
+        )
+        return renderer.RenderedPage(html, links, url)
 
     async def fake_fetch_html_retry(client, url, attempts=4, base_delay=1.5):
         if url == TARGET:
             return "<html><body>随机正文标记 DYNAMIC-BODY-4821</body></html>"
         return "<html><body>普通文章正文</body></html>"
 
-    monkeypatch.setattr(renderer, "render_page", fake_render)
-    monkeypatch.setattr(crawler, "fetch_html_retry", fake_fetch_html_retry)
+    monkeypatch.setattr(renderer, "render_page_result", fake_render)
+    monkeypatch.setattr(
+        crawler, "_fetch_crawl_html_retry", fake_fetch_html_retry
+    )
     return asyncio.run(crawler.crawl(BASE, depth=depth, render=True))
 
 
@@ -178,9 +220,10 @@ def test_render_discovery_hub_remains_bfs_frontier_after_supplement(monkeypatch)
 
     async def fake_render(url):
         render_calls.append(url)
-        return rendered[url]
+        html, links = rendered[url]
+        return renderer.RenderedPage(html, links, url)
 
-    monkeypatch.setattr(renderer, "render_page", fake_render)
+    monkeypatch.setattr(renderer, "render_page_result", fake_render)
     result = asyncio.run(crawler.crawl(BASE, depth=2, render=True))
 
     assert child in [page.url for page in result.pages]
@@ -198,13 +241,16 @@ def test_failed_static_discovery_article_falls_back_to_rendered_bfs(
     }
 
     async def fake_render(url):
-        return rendered[url]
+        html, links = rendered[url]
+        return renderer.RenderedPage(html, links, url)
 
     async def failed_static_fetch(client, url, attempts=4, base_delay=1.5):
         raise httpx.ConnectError("static fetch failed")
 
-    monkeypatch.setattr(renderer, "render_page", fake_render)
-    monkeypatch.setattr(crawler, "fetch_html_retry", failed_static_fetch)
+    monkeypatch.setattr(renderer, "render_page_result", fake_render)
+    monkeypatch.setattr(
+        crawler, "_fetch_crawl_html_retry", failed_static_fetch
+    )
     result = asyncio.run(crawler.crawl(BASE, depth=1, render=True))
     target_pages = [page for page in result.pages if page.url == TARGET]
 

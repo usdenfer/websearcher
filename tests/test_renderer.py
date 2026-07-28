@@ -5,6 +5,7 @@
 import asyncio
 
 import pytest
+import renderer
 
 pytest.importorskip("playwright")
 
@@ -35,6 +36,15 @@ def test_render_executes_js(site_server):
     html, links = asyncio.run(render_page(f"{site_server}/dynamic.html"))
     assert "JS注入的正文内容标记" in html
     assert any(u.endswith("/sub1.html") for u in links)
+
+
+def test_render_result_exposes_redirect_final_url(redirect_site):
+    assert hasattr(renderer, "render_page_result")
+    result = asyncio.run(
+        renderer.render_page_result(redirect_site["start"])
+    )
+    assert result.final_url == redirect_site["home"]
+    assert "Redirected home" in result.html
 
 
 def test_render_pagination_collects_links(site_server):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from urllib.parse import (
     SplitResult,
@@ -83,6 +84,57 @@ def _safe_urljoin(base: str, target: str) -> str | None:
         return urljoin(base, target)
     except (UnicodeError, ValueError):
         return None
+
+
+def canonical_host(host: str) -> str | None:
+    normalized = host.lower().rstrip(".")
+    if not normalized:
+        return None
+    try:
+        return ipaddress.ip_address(normalized).compressed
+    except ValueError:
+        try:
+            return normalized.encode("idna").decode("ascii").lower()
+        except (UnicodeError, ValueError):
+            return None
+
+
+def canonical_authority(url: str) -> tuple[str, int] | None:
+    """Return a credential-free, IDNA/IP-normalized host and effective port."""
+    parts = _safe_urlsplit(url)
+    if (
+        parts is None
+        or parts.scheme.lower() not in {"http", "https"}
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return None
+    host = canonical_host(parts.hostname or "")
+    if host is None:
+        return None
+    default_port = 443 if parts.scheme.lower() == "https" else 80
+    return host, parts.port if parts.port is not None else default_port
+
+
+def same_site_boundary(first_url: str, second_url: str) -> bool:
+    """Allow redirects within one registrable domain, or the exact same IP."""
+    first = canonical_authority(first_url)
+    second = canonical_authority(second_url)
+    if first is None or second is None:
+        return False
+    first_host, _first_port = first
+    second_host, _second_port = second
+    try:
+        first_ip = ipaddress.ip_address(first_host)
+    except ValueError:
+        first_ip = None
+    try:
+        second_ip = ipaddress.ip_address(second_host)
+    except ValueError:
+        second_ip = None
+    if first_ip is not None or second_ip is not None:
+        return first_ip is not None and first_ip == second_ip
+    return registrable_domain(first_host) == registrable_domain(second_host)
 
 
 def _normalized_netloc(parts: SplitResult) -> str:

@@ -9,6 +9,7 @@ can still be discovered.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 RENDER_TIMEOUT_MS = 25_000
 NETWORK_IDLE_MS = 6_000
@@ -19,6 +20,13 @@ RENDER_CONCURRENCY = 2
 
 class RenderError(Exception):
     """Rendering failed (navigation error, HTTP error, browser missing)."""
+
+
+@dataclass(frozen=True)
+class RenderedPage:
+    html: str
+    links: list[str]
+    final_url: str
 
 
 # Browser 与事件循环绑定：换 loop（如测试里多次 asyncio.run）必须重建
@@ -189,8 +197,8 @@ async def _harvest_pagination(page, seen: set[str]) -> tuple[set[str], list[str]
     return extra, html_parts
 
 
-async def render_page(url: str) -> tuple[str, list[str]]:
-    """渲染 URL，返回 (最终 HTML, 页面及翻页中发现的全部 http(s) 链接)。"""
+async def render_page_result(url: str) -> RenderedPage:
+    """Render a page and retain the browser's effective URL after navigation."""
     browser = await _get_browser()
     async with _state["sem"]:
         page = await browser.new_page()
@@ -210,9 +218,15 @@ async def render_page(url: str) -> tuple[str, list[str]]:
             links |= extra
             # 拼接初始与每个翻页状态的 HTML，避免内容被覆盖丢失
             html = "\n".join([initial_html, *html_parts])
-            return html, sorted(links)
+            return RenderedPage(html, sorted(links), page.url)
         finally:
             try:
                 await page.close()
             except Exception:
                 pass
+
+
+async def render_page(url: str) -> tuple[str, list[str]]:
+    """渲染 URL，返回 (最终 HTML, 页面及翻页中发现的全部 http(s) 链接)。"""
+    result = await render_page_result(url)
+    return result.html, result.links

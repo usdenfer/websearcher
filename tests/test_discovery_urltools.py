@@ -1,3 +1,6 @@
+import pytest
+
+import discovery.urltools as urltools
 from discovery.models import DomainPolicy
 from discovery.urltools import (
     canonical_url,
@@ -7,6 +10,21 @@ from discovery.urltools import (
     registrable_domain,
     url_allowed,
 )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("HTTP://ExAmPle.COM.:80/a", ("example.com", 80)),
+        ("https://例子.测试:443/a", ("xn--fsqu00a.xn--0zwm56d", 443)),
+        ("http://[2001:0db8::1]:80/", ("2001:db8::1", 80)),
+        ("https://example.com:8443/", ("example.com", 8443)),
+        ("https://user:pass@example.com/", None),
+    ],
+)
+def test_canonical_authority(url, expected):
+    assert hasattr(urltools, "canonical_authority")
+    assert urltools.canonical_authority(url) == expected
 
 
 def test_normalize_drops_tracking_but_keeps_semantic_parameters():

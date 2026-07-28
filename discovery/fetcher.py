@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 from urllib.parse import urlsplit
 
 import httpx
 
 from crawler import PAGE_TIMEOUT, USER_AGENT, fetch_html_retry
 from discovery.models import BudgetManager, DiscoveryStats
-
-
-def _canonical_host(host: str) -> str | None:
-    normalized = host.lower().rstrip(".")
-    try:
-        return ipaddress.ip_address(normalized).compressed
-    except ValueError:
-        try:
-            return normalized.encode("idna").decode("ascii").lower().rstrip(".")
-        except UnicodeError:
-            return None
+from discovery.urltools import canonical_host
 
 
 def _url_parts(
@@ -27,7 +16,7 @@ def _url_parts(
     try:
         parts = urlsplit(url)
         scheme = parts.scheme.lower()
-        host = _canonical_host(parts.hostname or "")
+        host = canonical_host(parts.hostname or "")
         port = parts.port
     except (TypeError, ValueError):
         return None

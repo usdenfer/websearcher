@@ -76,6 +76,7 @@ def test_crawl_preserves_redirected_home_and_resolves_relative_links(
 
 def test_crawl_rejects_subpage_redirect_outside_effective_root(
         redirect_site):
+    redirect_site["handler"].outside_requests = 0
     result = asyncio.run(crawl(redirect_site["start"], depth=1))
 
     assert [page.url for page in result.pages] == [
@@ -86,6 +87,146 @@ def test_crawl_rejects_subpage_redirect_outside_effective_root(
         "url": redirect_site["escape"],
         "reason": "重定向到站外地址",
     }]
+    assert redirect_site["handler"].outside_requests == 0
+
+
+def test_crawl_allows_apex_to_www_but_blocks_unrelated_home_redirect(
+        monkeypatch):
+    import crawler
+
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.host == "example.test":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://www.example.test/home/"},
+                request=request,
+            )
+        if request.url.host == "www.example.test":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text="<html><main>home</main></html>",
+                request=request,
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    transport_box = [transport]
+    real_client = httpx.AsyncClient
+
+    def client_factory(**kwargs):
+        return real_client(transport=transport_box[0], **kwargs)
+
+    monkeypatch.setattr(crawler.httpx, "AsyncClient", client_factory)
+    result = asyncio.run(crawl("https://example.test/start", depth=0))
+    assert result.pages[0].url == "https://www.example.test/home/"
+    assert requested == [
+        "https://example.test/start",
+        "https://www.example.test/home/",
+    ]
+
+    requested.clear()
+
+    def hostile_handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={"Location": "https://evil.test/home/"},
+            request=request,
+        )
+
+    transport_box[0] = httpx.MockTransport(hostile_handler)
+    with pytest.raises(ValueError, match="站外"):
+        asyncio.run(crawl("https://example.test/start", depth=0))
+    assert requested == ["https://example.test/start"]
+
+
+def test_crawl_accepts_exact_signature_fetch_double(monkeypatch):
+    import crawler
+
+    calls = []
+
+    async def fake_fetch(client, url, attempts, base_delay):
+        calls.append((url, attempts, base_delay))
+        return crawler.FetchedHtml(
+            "<html><main>ok</main></html>",
+            "https://www.example.test/home/",
+        )
+
+    monkeypatch.setattr(
+        crawler,
+        "_fetch_crawl_html_retry",
+        fake_fetch,
+        raising=False,
+    )
+    result = asyncio.run(crawl("https://example.test/start", depth=0))
+    assert result.pages[0].url == "https://www.example.test/home/"
+    assert calls == [("https://example.test/start", 4, 1.5)]
+
+
+def test_crawl_max_pages_counts_redirected_candidate_attempts(monkeypatch):
+    import crawler
+
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        requested.append(path)
+        if path == "/":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text=(
+                    "<html><a href='/a'>a</a><a href='/b'>b</a></html>"
+                ),
+                request=request,
+            )
+        if path in {"/a", "/b"}:
+            return httpx.Response(
+                302,
+                headers={"Location": "/same"},
+                request=request,
+            )
+        if path == "/same":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text="<html><a href='/next'>next</a></html>",
+                request=request,
+            )
+        if path == "/next":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text="<html>must not be requested</html>",
+                request=request,
+            )
+        raise AssertionError(path)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        crawler.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=transport, **kwargs),
+    )
+
+    result = asyncio.run(crawl(
+        "https://example.test/",
+        depth=2,
+        max_pages=3,
+    ))
+
+    assert [page.url for page in result.pages] == [
+        "https://example.test/",
+        "https://example.test/same",
+    ]
+    assert requested.count("/a") == 1
+    assert requested.count("/b") == 1
+    assert "/next" not in requested
 
 
 def test_crawl_start_page_failure_raises(site_server):
@@ -116,7 +257,8 @@ def test_crawl_respects_max_pages(site_server):
 def test_crawl_deadline_keeps_completed_pages(monkeypatch):
     import crawler
 
-    async def fake_fetch(client, url, **kwargs):
+    async def fake_fetch(client, url, attempts=4, base_delay=1.5):
+        del client, attempts, base_delay
         if url.endswith("/index.html"):
             return ("<html><body><a href='/slow.html'>slow</a>"
                     "<a href='/fast.html'>fast</a></body></html>")
@@ -124,7 +266,7 @@ def test_crawl_deadline_keeps_completed_pages(monkeypatch):
             await asyncio.sleep(1)
         return f"<html><main>{url}</main></html>"
 
-    monkeypatch.setattr(crawler, "fetch_html_retry", fake_fetch)
+    monkeypatch.setattr(crawler, "_fetch_crawl_html_retry", fake_fetch)
     started = time.monotonic()
     result = asyncio.run(crawl(
         "https://deadline.test/index.html",
@@ -163,7 +305,8 @@ def test_static_start_page_obeys_deadline_and_cancels(monkeypatch):
 
     cancelled = []
 
-    async def slow_fetch(client, url, **kwargs):
+    async def slow_fetch(client, url, attempts=4, base_delay=1.5):
+        del client, attempts, base_delay
         try:
             await asyncio.sleep(0.3)
         except asyncio.CancelledError:
@@ -171,7 +314,7 @@ def test_static_start_page_obeys_deadline_and_cancels(monkeypatch):
             raise
         return "<html><main>late</main></html>"
 
-    monkeypatch.setattr(crawler, "fetch_html_retry", slow_fetch)
+    monkeypatch.setattr(crawler, "_fetch_crawl_html_retry", slow_fetch)
     started = time.monotonic()
     result = asyncio.run(crawl(
         "https://slow-static.test/",
@@ -199,7 +342,11 @@ def test_render_start_page_obeys_deadline_and_cancels(monkeypatch):
             raise
         return "<html><main>late</main></html>", []
 
-    monkeypatch.setattr(renderer, "render_page", slow_render)
+    async def slow_render_result(url):
+        html, links = await slow_render(url)
+        return renderer.RenderedPage(html, links, url)
+
+    monkeypatch.setattr(renderer, "render_page_result", slow_render_result)
     started = time.monotonic()
     result = asyncio.run(crawl(
         "https://slow-render.test/",
