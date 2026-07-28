@@ -175,7 +175,7 @@ async def fetch_html_response(
 
     current_url = url
     for _hop in range(MAX_REDIRECT_HOPS + 1):
-        if not reserve_request():
+        if reserve_request is not None and not reserve_request():
             raise PageBudgetExhausted("页面预算已用尽")
         response = await client.get(
             current_url, follow_redirects=False

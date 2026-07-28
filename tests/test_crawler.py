@@ -6,8 +6,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from crawler import (CONCURRENCY, MAX_SUBPAGES, MAX_TOTAL_PAGES, crawl,
-                     extract_same_site_links, is_binary_url, normalize_url)
+from crawler import (
+    CONCURRENCY,
+    MAX_SUBPAGES,
+    MAX_TOTAL_PAGES,
+    FetchedHtml,
+    UnsafeRedirect,
+    crawl,
+    extract_same_site_links,
+    fetch_html_response,
+    fetch_html_retry,
+    is_binary_url,
+    normalize_url,
+)
 
 FIXTURE_SITE = Path(__file__).parent / "fixtures" / "site"
 
@@ -70,6 +81,78 @@ def test_extract_skips_visited_before_limit(site_server):
     visited = {f"{site_server}/sub1.html", f"{site_server}/sub2.html"}
     links = extract_same_site_links(html, base, skip=visited)
     assert links == [f"{site_server}/missing.html"]
+
+
+def test_fetch_html_response_supports_redirect_policy_without_budget_callback():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            if request.url.path == "/start":
+                return httpx.Response(
+                    302, headers={"location": "/final"}
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<main>final</main>",
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            result = await fetch_html_response(
+                client,
+                "https://x.test/start",
+                redirect_allowed=lambda url: url.startswith(
+                    "https://x.test/"
+                ),
+            )
+
+        assert result == FetchedHtml(
+            "<main>final</main>", "https://x.test/final"
+        )
+        assert requested == [
+            "https://x.test/start",
+            "https://x.test/final",
+        ]
+
+    asyncio.run(run())
+
+
+def test_fetch_html_retry_policy_only_blocks_redirect_before_target_request():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            if request.url.host == "x.test":
+                return httpx.Response(
+                    302,
+                    headers={"location": "https://outside.test/secret"},
+                )
+            raise AssertionError("站外目标不得发出请求")
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            with pytest.raises(UnsafeRedirect):
+                await fetch_html_retry(
+                    client,
+                    "https://x.test/start",
+                    attempts=1,
+                    include_final_url=True,
+                    redirect_allowed=lambda url: url.startswith(
+                        "https://x.test/"
+                    ),
+                )
+
+        assert requested == ["https://x.test/start"]
+
+    asyncio.run(run())
 
 
 def test_crawl_collects_pages_and_failures(site_server):
