@@ -73,8 +73,11 @@ def test_budget_manager_expiration_uses_monotonic(monkeypatch):
     assert budget.expired()
 
 
-def test_discovery_stats_as_dict_exposes_stable_api_shape(monkeypatch):
-    monkeypatch.setattr("discovery.models.time.monotonic", lambda: 12.345)
+def test_discovery_stats_defaults_to_generic_profile():
+    assert DiscoveryStats().profile == "generic"
+
+
+def test_discovery_stats_as_dict_exposes_stable_api_shape():
     stats = DiscoveryStats(
         profile="general",
         sources_tried={"sitemap", "site_search"},
@@ -84,7 +87,7 @@ def test_discovery_stats_as_dict_exposes_stable_api_shape(monkeypatch):
         rendered_pages=2,
         budget_expanded=True,
         partial=True,
-        started_at=10.0,
+        elapsed_ms=2345,
         warnings=["provider unavailable"],
     )
 

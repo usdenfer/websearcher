@@ -48,7 +48,7 @@ class DomainPolicy:
 
 @dataclass
 class DiscoveryStats:
-    profile: str = ""
+    profile: str = "generic"
     sources_tried: set[str] = field(default_factory=set)
     sources_succeeded: set[str] = field(default_factory=set)
     candidates_found: int = 0
@@ -56,11 +56,10 @@ class DiscoveryStats:
     rendered_pages: int = 0
     budget_expanded: bool = False
     partial: bool = False
-    started_at: float = field(default_factory=time.monotonic)
+    elapsed_ms: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
-        elapsed_ms = int((time.monotonic() - self.started_at) * 1000)
         return {
             "profile": self.profile,
             "sourcesTried": sorted(self.sources_tried),
@@ -70,7 +69,7 @@ class DiscoveryStats:
             "renderedPages": self.rendered_pages,
             "budgetExpanded": self.budget_expanded,
             "partial": self.partial,
-            "elapsedMs": elapsed_ms,
+            "elapsedMs": self.elapsed_ms,
             "warnings": list(self.warnings),
         }
 
