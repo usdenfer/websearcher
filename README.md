@@ -63,6 +63,31 @@ npm run dev -- --port 8080
   2~8 分钟；已知栏目页地址时直接填栏目页 + 深度 1 更快。
 - 渲染模式预算：最多 60 页、单列表最多翻 100 页、整体 10 分钟超时。
 
+## 通用发现与手动冒烟
+
+搜索会综合网站公开的搜索入口、sitemap、Feed、栏目分页和普通 BFS 来发现
+候选页，再抓取目标页，以正文可见文本确认关键词。关键词引导的结构化发现
+不受 `--depth` 控制的普通 BFS 点击层级限制，但仍受统一时间和页面预算约束。
+响应中的 `discovery` 给出实际尝试及成功的来源、候选数量、警告和耗时；
+`partial: true` 表示达到预算或部分来源失败时返回的是已完成的部分结果。
+
+启动服务后，可用参数化脚本手动检查公开网站。每次应传入用户选择的正文
+关键词，脚本只输出 `pagesCrawled`、`totalHits`、`discovery` 和命中页面 URL：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_discovery.py `
+  "https://www.gamersky.com/" "用户选择的正文关键词"
+
+.\.venv\Scripts\python.exe scripts\smoke_discovery.py `
+  "https://www.zycg.gov.cn/" "用户选择的正文关键词"
+```
+
+Gamersky 仅用于验证通用规则，不配置专用 adapter。线上网站结构和内容会
+变化，因此这些检查只手动运行，不作为持续集成的固定断言。中央政府采购网
+的 FreeCMS API 失败时，诊断中应能看到 `category` 等降级来源；部分来源
+失败也可能同时返回已有结果并标记 `partial`。工具不会绕过验证码、登录墙
+或其他访问控制，也不会在脚本中固化真实姓名或业务关键词。
+
 ## 运行测试
 
 ```bash
