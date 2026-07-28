@@ -27,6 +27,21 @@ def test_normalize_sorts_query_for_stable_deduplication():
     assert normalize_candidate_url("https://x.test/a///") == "https://x.test/a"
 
 
+def test_normalize_preserves_order_of_repeated_parameter_values():
+    assert normalize_candidate_url(
+        "https://x.test/a?x=1&step=b&step=a"
+    ) == "https://x.test/a?step=b&step=a&x=1"
+
+
+def test_normalize_lowercases_host_without_changing_userinfo():
+    assert normalize_candidate_url(
+        "HTTPS://User:PaSS@EXAMPLE.COM:8443/a"
+    ) == "https://User:PaSS@example.com:8443/a"
+    assert normalize_candidate_url(
+        "HTTPS://[2001:DB8::1]:8443/a"
+    ) == "https://[2001:db8::1]:8443/a"
+
+
 def test_url_allowed_uses_explicit_content_hosts():
     policy = DomainPolicy(
         "www.example.test",
@@ -51,6 +66,16 @@ def test_html_candidate_requires_http_host():
     assert not is_html_candidate("https:///article.html")
 
 
+def test_malformed_ipv6_authority_is_rejected_without_raising():
+    malformed = "https://[::1"
+    assert normalize_candidate_url(malformed) == ""
+    assert not is_html_candidate(malformed)
+    policy = DomainPolicy("x.test", frozenset({"x.test"}))
+    assert not url_allowed(malformed, policy)
+    extended = extend_policy_with_declared_urls(policy, [malformed])
+    assert extended.allowed_hosts == policy.allowed_hosts
+
+
 def test_canonical_is_used_only_inside_domain_policy():
     policy = DomainPolicy("x.test", frozenset({"x.test"}))
     assert canonical_url(
@@ -61,6 +86,20 @@ def test_canonical_is_used_only_inside_domain_policy():
     assert canonical_url(
         '<link rel="canonical" href="https://outside.test/a">',
         "https://x.test/original.html",
+        policy,
+    ) == "https://x.test/original.html"
+
+
+def test_canonical_rel_is_case_insensitive_and_malformed_target_falls_back():
+    policy = DomainPolicy("x.test", frozenset({"x.test"}))
+    assert canonical_url(
+        '<link rel="alternate Canonical stylesheet" href="/clean.html">',
+        "https://x.test/original.html",
+        policy,
+    ) == "https://x.test/clean.html"
+    assert canonical_url(
+        '<link rel="Canonical" href="https://[::1">',
+        "https://x.test/original.html?utm_source=x",
         policy,
     ) == "https://x.test/original.html"
 

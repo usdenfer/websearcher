@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from urllib.parse import (
+    SplitResult,
     parse_qsl,
     urlencode,
     urldefrag,
@@ -66,9 +67,45 @@ EXCLUDED_HOST_LABELS = {
 }
 
 
+def _safe_urlsplit(url: str) -> SplitResult | None:
+    try:
+        parts = urlsplit(url)
+        # Accessing these properties performs additional authority validation.
+        _hostname = parts.hostname
+        _port = parts.port
+    except (UnicodeError, ValueError):
+        return None
+    return parts
+
+
+def _safe_urljoin(base: str, target: str) -> str | None:
+    try:
+        return urljoin(base, target)
+    except (UnicodeError, ValueError):
+        return None
+
+
+def _normalized_netloc(parts: SplitResult) -> str:
+    host = parts.hostname
+    if host is None:
+        return parts.netloc
+    userinfo, separator, _authority = parts.netloc.rpartition("@")
+    prefix = f"{userinfo}@" if separator else ""
+    normalized_host = host.lower()
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{prefix}{normalized_host}{port}"
+
+
 def normalize_candidate_url(url: str) -> str:
-    clean, _fragment = urldefrag(url.strip())
-    parts = urlsplit(clean)
+    try:
+        clean, _fragment = urldefrag(url.strip())
+    except (UnicodeError, ValueError):
+        return ""
+    parts = _safe_urlsplit(clean)
+    if parts is None:
+        return ""
     path = parts.path or "/"
     if path != "/":
         path = path.rstrip("/")
@@ -77,11 +114,11 @@ def normalize_candidate_url(url: str) -> str:
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
         if key.lower() not in TRACKING_KEYS
     ]
-    query.sort()
+    query.sort(key=lambda item: item[0])
     return urlunsplit(
         (
             parts.scheme.lower(),
-            parts.netloc.lower(),
+            _normalized_netloc(parts),
             path,
             urlencode(query, doseq=True),
             "",
@@ -90,7 +127,9 @@ def normalize_candidate_url(url: str) -> str:
 
 
 def is_html_candidate(url: str) -> bool:
-    parts = urlsplit(url)
+    parts = _safe_urlsplit(url)
+    if parts is None:
+        return False
     if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
         return False
     path = parts.path.lower()
@@ -110,7 +149,9 @@ def registrable_domain(host: str) -> str:
 
 
 def url_allowed(url: str, policy: DomainPolicy) -> bool:
-    parts = urlsplit(url)
+    parts = _safe_urlsplit(url)
+    if parts is None:
+        return False
     host = (parts.hostname or "").lower().rstrip(".")
     if not is_html_candidate(url) or not host:
         return False
@@ -134,7 +175,8 @@ def extend_policy_with_declared_urls(
     root_domain = registrable_domain(policy.root_host)
     allowed = set(policy.allowed_hosts)
     for url in urls:
-        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        parts = _safe_urlsplit(url)
+        host = (parts.hostname or "").lower().rstrip(".") if parts else ""
         if host and registrable_domain(host) == root_domain:
             allowed.add(host)
     return DomainPolicy(
@@ -151,9 +193,18 @@ def canonical_url(
     policy: DomainPolicy,
 ) -> str:
     soup = BeautifulSoup(html, "html.parser")
-    node = soup.find("link", rel=lambda value: value and "canonical" in value)
+    node = None
+    for link in soup.find_all("link"):
+        rel = link.get("rel", [])
+        tokens = rel.split() if isinstance(rel, str) else rel
+        if any(str(token).lower() == "canonical" for token in tokens):
+            node = link
+            break
     original = normalize_candidate_url(page_url)
     if node is None or not node.get("href"):
         return original
-    candidate = normalize_candidate_url(urljoin(page_url, node["href"]))
+    joined = _safe_urljoin(page_url, str(node["href"]))
+    if joined is None:
+        return original
+    candidate = normalize_candidate_url(joined)
     return candidate if url_allowed(candidate, policy) else original
