@@ -1,0 +1,5 @@
+<script>
+var data = '?&title=' + searchContent + '&currPage=' + currPage +
+           '&pageSize=' + pageSize;
+$.ajax({url: '/freecms/rest/v1/notice/searchAll.do' + data});
+</script>
