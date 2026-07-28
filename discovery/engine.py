@@ -209,10 +209,13 @@ async def discover_pages(
     feed_urls = list(
         dict.fromkeys(detect_feed_urls(homepage, effective_start_url))
     )
-    if adapter.profile == "generic":
+    declared_urls = (
+        [spec.url for spec in detected_specs] + feed_urls
+    )
+    if adapter.profile == "generic" and declared_urls:
         policy = extend_policy_with_declared_urls(
             policy,
-            [spec.url for spec in detected_specs] + feed_urls,
+            declared_urls,
         )
     specs = _deduplicate_specs(
         [*adapter.search_specs(), *detected_specs]
@@ -230,7 +233,9 @@ async def discover_pages(
     origin = _safe_origin(effective_start_url)
 
     async with make_client() as client:
-        fetcher = DiscoveryFetcher(client, budget, stats)
+        fetcher = DiscoveryFetcher(
+            client, budget, stats, policy=policy
+        )
         providers = [
             SitemapProvider(client, budget, stats, policy, origin),
             FeedProvider(client, budget, stats, policy, feed_urls),
@@ -322,30 +327,57 @@ async def discover_pages(
         pages: list[CrawledPage] = []
         scheduled_count = 0
 
-        async def fetch(item: Candidate) -> CrawledPage | None:
-            html = await fetcher.fetch_html(item.url)
-            if html is None:
+        async def fetch(
+            item: Candidate,
+        ) -> tuple[str, CrawledPage] | None:
+            fetch_html_page = getattr(
+                fetcher, "fetch_html_page", None
+            )
+            if fetch_html_page is not None:
+                loaded = await fetch_html_page(item.url)
+                if loaded is None:
+                    return None
+                page = CrawledPage(loaded.final_url, loaded.html)
+            else:
+                html = await fetcher.fetch_html(item.url)
+                if html is None:
+                    return None
+                page = CrawledPage(item.url, html)
+            if not normalize_candidate_url(page.url):
                 return None
-            return CrawledPage(item.url, html)
+            return item.url, page
 
         first_capacity = max(
             0, budget.page_limit - budget.used_html_pages
         )
         first_batch = pending[:first_capacity]
         first_success_urls: set[str] = set()
+        page_urls = set(visited)
+
+        def append_unique(
+            fetched_items: list[tuple[str, CrawledPage]],
+            successful_candidates: set[str],
+        ) -> None:
+            for candidate_url, page in fetched_items:
+                successful_candidates.add(candidate_url)
+                normalized_page_url = normalize_candidate_url(page.url)
+                if normalized_page_url in page_urls:
+                    continue
+                page_urls.add(normalized_page_url)
+                pages.append(page)
+
         if first_batch:
             fetched, timed_out = await _gather_candidates(
                 [fetch(item) for item in first_batch],
                 budget,
             )
             stats.partial = stats.partial or timed_out
-            successful_pages = [
-                page for page in fetched if page is not None
+            successful_items = [
+                item for item in fetched if item is not None
             ]
-            pages.extend(successful_pages)
-            first_success_urls.update(
-                normalize_candidate_url(page.url)
-                for page in successful_pages
+            append_unique(
+                successful_items,
+                first_success_urls,
             )
             scheduled_count += len(first_batch)
 
@@ -375,8 +407,10 @@ async def discover_pages(
                     budget,
                 )
                 stats.partial = stats.partial or timed_out
-                pages.extend(
-                    page for page in fetched if page is not None
+                second_success_urls: set[str] = set()
+                append_unique(
+                    [item for item in fetched if item is not None],
+                    second_success_urls,
                 )
                 scheduled_count += len(second_batch)
 

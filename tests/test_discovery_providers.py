@@ -408,6 +408,52 @@ def test_category_rendering_uses_fetcher_shared_budget_and_normalizes_links(
     asyncio.run(run())
 
 
+def test_category_rendering_uses_render_final_url_for_self_and_pagination():
+    async def run():
+        class FinalUrlFetcher:
+            async def fetch_rendered_page(self, url):
+                assert url == "https://x.test/redirected/category"
+                return __import__(
+                    "renderer", fromlist=["RenderedPage"]
+                ).RenderedPage(
+                    """
+                    <a class="page" href="?page=2">下一页</a>
+                    """,
+                    [
+                        "https://x.test/final/category",
+                        "https://x.test/final/category?page=2",
+                        "article.html",
+                    ],
+                    "https://x.test/final/category",
+                )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<div id='app'></div>",
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await CategoryProvider(
+                client,
+                BudgetManager(),
+                DiscoveryStats(),
+                POLICY,
+                ["https://x.test/redirected/category"],
+                fetcher=FinalUrlFetcher(),
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://x.test/final/article.html"
+        ]
+
+    asyncio.run(run())
+
+
 def test_category_empty_keywords_and_cross_page_duplicates_are_safe():
     async def run():
         def handler(request: httpx.Request) -> httpx.Response:

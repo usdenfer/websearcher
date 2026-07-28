@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from crawler import CrawledPage, CrawlResult, crawl
+from crawler import CrawledPage, CrawlResult, FetchedHtml, crawl
 from discovery.engine import (
     DiscoveryRun,
     discover_pages,
@@ -187,10 +187,11 @@ def _install_engine_fakes(
     fetcher_records: list[object] = []
 
     class FakeFetcher:
-        def __init__(self, client, budget, stats):
+        def __init__(self, client, budget, stats, policy=None):
             assert client is context.client
             self.budget = budget
             self.stats = stats
+            self.policy = policy
             self.urls: list[str] = []
             fetcher_records.append(self)
 
@@ -381,6 +382,97 @@ def test_generic_discovery_extends_policy_and_deduplicates_specs_categories(
         "feeds.portal.test",
     }
     assert context.exited is True
+
+
+def test_generic_discovery_does_not_extend_policy_without_declarations(
+    monkeypatch,
+):
+    import discovery.engine as engine
+
+    _context, provider_records, _fetchers = _install_engine_fakes(monkeypatch)
+    monkeypatch.setattr(engine, "detect_search_specs", lambda *_: [])
+    monkeypatch.setattr(engine, "detect_feed_urls", lambda *_: [])
+    monkeypatch.setattr(engine, "detect_category_urls", lambda *_: [])
+
+    def reject_empty_extension(policy, urls):
+        assert urls, "无可信声明时不得调用扩权函数"
+        return policy
+
+    monkeypatch.setattr(
+        engine,
+        "extend_policy_with_declared_urls",
+        reject_empty_extension,
+    )
+
+    _run(
+        discover_pages(
+            "https://www.portal.test/",
+            [],
+            CrawlResult(
+                pages=[
+                    CrawledPage(
+                        "https://www.portal.test/", "<html></html>"
+                    )
+                ]
+            ),
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    assert all(
+        policy.allow_related_hosts is False
+        for _source, _provider, policy in provider_records
+    )
+
+
+def test_discovery_uses_static_final_urls_and_deduplicates_redirects(
+    monkeypatch,
+):
+    import discovery.engine as engine
+
+    candidates = [
+        Candidate("https://x.test/alias-a", "sitemap", score=100),
+        Candidate("https://x.test/alias-b", "sitemap", score=90),
+    ]
+    context, _providers, _fetchers = _install_engine_fakes(
+        monkeypatch, batches={"sitemap": candidates}
+    )
+    observed_policy = None
+
+    class RedirectingFetcher:
+        def __init__(self, client, budget, stats, *, policy):
+            nonlocal observed_policy
+            assert client is context.client
+            observed_policy = policy
+            self.budget = budget
+
+        async def fetch_html_page(self, url):
+            assert self.budget.reserve_html()
+            return FetchedHtml(
+                f"<main>{url} 正文关键字</main>",
+                "https://x.test/final",
+            )
+
+    monkeypatch.setattr(engine, "DiscoveryFetcher", RedirectingFetcher)
+
+    result = _run(
+        discover_pages(
+            "https://x.test/",
+            ["正文关键字"],
+            CrawlResult(
+                pages=[CrawledPage("https://x.test/", "<html></html>")]
+            ),
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    assert observed_policy is not None
+    assert [page.url for page in result.pages] == [
+        "https://x.test/final"
+    ]
+    assert result.stats.candidates_fetched == 1
 
 
 def test_redirected_homepage_url_drives_all_site_discovery(monkeypatch):

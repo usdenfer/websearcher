@@ -7,13 +7,15 @@ from urllib.parse import urlsplit
 import httpx
 
 from crawler import (
+    FetchedHtml,
     PAGE_TIMEOUT,
     USER_AGENT,
     PageBudgetExhausted,
+    UnsafeRedirect,
     fetch_html_retry,
 )
-from discovery.models import BudgetManager, DiscoveryStats
-from discovery.urltools import canonical_host
+from discovery.models import BudgetManager, DiscoveryStats, DomainPolicy
+from discovery.urltools import canonical_host, url_allowed
 
 
 def _url_parts(
@@ -61,12 +63,14 @@ class DiscoveryFetcher:
         stats: DiscoveryStats,
         concurrency: int = 8,
         per_host_concurrency: int = 4,
+        policy: DomainPolicy | None = None,
     ):
         self.client = client
         self.budget = budget
         self.stats = stats
         self.semaphore = asyncio.Semaphore(concurrency)
         self.per_host_concurrency = per_host_concurrency
+        self.policy = policy
         self.host_semaphores: dict[
             tuple[str, int | None], asyncio.Semaphore
         ] = {}
@@ -82,7 +86,12 @@ class DiscoveryFetcher:
         self.stats.partial = True
         return False
 
-    async def fetch_html(self, url: str) -> str | None:
+    def _allowed(self, url: str) -> bool:
+        return self.policy is None or url_allowed(url, self.policy)
+
+    async def fetch_html_page(self, url: str) -> FetchedHtml | None:
+        if not self._allowed(url):
+            return None
         async with self.semaphore, self.host_semaphore(url):
             try:
                 remaining = self.budget.remaining_seconds()
@@ -90,17 +99,44 @@ class DiscoveryFetcher:
                     self.stats.partial = True
                     return None
                 async with asyncio.timeout(remaining):
-                    return await fetch_html_retry(
+                    parameters = inspect.signature(
+                        fetch_html_retry
+                    ).parameters
+                    kwargs = {
+                        "attempts": 2,
+                        "base_delay": 1.0,
+                        "reserve_request": self._reserve,
+                    }
+                    if "include_final_url" in parameters:
+                        kwargs["include_final_url"] = True
+                    if (
+                        self.policy is not None
+                        and "redirect_allowed" in parameters
+                    ):
+                        kwargs["redirect_allowed"] = self._allowed
+                    loaded = await fetch_html_retry(
                         self.client,
                         url,
-                        attempts=2,
-                        base_delay=1.0,
-                        reserve_request=self._reserve,
+                        **kwargs,
                     )
+                    if loaded is None:
+                        return None
+                    page = (
+                        loaded
+                        if isinstance(loaded, FetchedHtml)
+                        else FetchedHtml(loaded, url)
+                    )
+                    if not self._allowed(page.final_url):
+                        return None
+                    return page
             except TimeoutError:
                 self.stats.partial = True
             except PageBudgetExhausted:
                 self.stats.partial = True
+            except UnsafeRedirect:
+                self.stats.warnings.append(
+                    f"{_sanitize_url(url)}: 重定向目标不在允许范围"
+                )
             except asyncio.CancelledError:
                 raise
             except ValueError:
@@ -113,9 +149,13 @@ class DiscoveryFetcher:
                 )
         return None
 
-    async def fetch_rendered(
-        self, url: str
-    ) -> tuple[str, list[str]] | None:
+    async def fetch_html(self, url: str) -> str | None:
+        page = await self.fetch_html_page(url)
+        return None if page is None else page.html
+
+    async def fetch_rendered_page(self, url: str):
+        if not self._allowed(url):
+            return None
         async with self.semaphore, self.host_semaphore(url):
             try:
                 import renderer
@@ -124,19 +164,27 @@ class DiscoveryFetcher:
                     self.stats.partial = True
                     return None
                 async with asyncio.timeout(remaining):
-                    if (
-                        "reserve_request"
-                        in inspect.signature(
-                            renderer.render_page
-                        ).parameters
-                    ):
-                        html, links = await renderer.render_page(
-                            url, reserve_request=self._reserve
+                    if self.policy is not None:
+                        result = await renderer.render_page_result(
+                            url,
+                            navigation_allowed=self._allowed,
+                            reserve_request=self._reserve,
                         )
                     else:
-                        if not self._reserve():
-                            return None
-                        html, links = await renderer.render_page(url)
+                        if (
+                            "reserve_request"
+                            in inspect.signature(
+                                renderer.render_page
+                            ).parameters
+                        ):
+                            html, links = await renderer.render_page(
+                                url, reserve_request=self._reserve
+                            )
+                        else:
+                            if not self._reserve():
+                                return None
+                            html, links = await renderer.render_page(url)
+                        result = renderer.RenderedPage(html, links, url)
             except TimeoutError:
                 self.stats.partial = True
                 return None
@@ -147,8 +195,18 @@ class DiscoveryFetcher:
                     f"{_sanitize_url(url)}: render {type(exc).__name__}"
                 )
                 return None
+        if not self._allowed(result.final_url):
+            return None
         self.stats.rendered_pages += 1
-        return html, links
+        return result
+
+    async def fetch_rendered(
+        self, url: str
+    ) -> tuple[str, list[str]] | None:
+        page = await self.fetch_rendered_page(url)
+        if page is None:
+            return None
+        return page.html, page.links
 
 
 def make_client() -> httpx.AsyncClient:

@@ -385,19 +385,43 @@ class CategoryProvider(Provider):
                 and self.render_mode != "off"
                 and self.fetcher is not None
             ):
-                rendered = await self.fetcher.fetch_rendered(final_url)
+                fetch_rendered_page = getattr(
+                    self.fetcher, "fetch_rendered_page", None
+                )
+                if fetch_rendered_page is not None:
+                    rendered_page = await fetch_rendered_page(final_url)
+                    rendered = (
+                        None
+                        if rendered_page is None
+                        else (
+                            rendered_page.html,
+                            rendered_page.links,
+                            rendered_page.final_url,
+                        )
+                    )
+                else:
+                    legacy = await self.fetcher.fetch_rendered(final_url)
+                    rendered = (
+                        None
+                        if legacy is None
+                        else (legacy[0], legacy[1], final_url)
+                    )
                 if rendered is not None:
-                    rendered_html, links = rendered
+                    rendered_html, links, rendered_final_url = rendered
                     excluded_rendered_urls = set(
                         parse_pagination(
-                            rendered_html, final_url, self.policy
+                            rendered_html,
+                            rendered_final_url,
+                            self.policy,
                         )
                     )
                     excluded_rendered_urls.update(
                         filter(
                             None,
                             (
-                                normalize_candidate_url(final_url),
+                                normalize_candidate_url(
+                                    rendered_final_url
+                                ),
                                 normalize_candidate_url(url),
                             ),
                         )
@@ -405,7 +429,7 @@ class CategoryProvider(Provider):
                     rendered_candidates = []
                     for link in links:
                         normalized = normalize_candidate_url(
-                            urljoin(final_url, link)
+                            urljoin(rendered_final_url, link)
                         )
                         if (
                             normalized

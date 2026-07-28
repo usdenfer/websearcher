@@ -226,11 +226,15 @@ def extend_policy_with_declared_urls(
 ) -> DomainPolicy:
     root_domain = registrable_domain(policy.root_host)
     allowed = set(policy.allowed_hosts)
+    trusted_declaration = False
     for url in urls:
         parts = _safe_urlsplit(url)
         host = (parts.hostname or "").lower().rstrip(".") if parts else ""
         if host and registrable_domain(host) == root_domain:
+            trusted_declaration = True
             allowed.add(host)
+    if not trusted_declaration:
+        return policy
     return DomainPolicy(
         policy.root_host,
         frozenset(allowed),

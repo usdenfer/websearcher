@@ -3,9 +3,13 @@ import asyncio
 import httpx
 import pytest
 
-from crawler import PAGE_TIMEOUT, USER_AGENT
+from crawler import FetchedHtml, PAGE_TIMEOUT, USER_AGENT
 from discovery.fetcher import DiscoveryFetcher, make_client
-from discovery.models import BudgetManager, DiscoveryStats
+from discovery.models import BudgetManager, DiscoveryStats, DomainPolicy
+from renderer import RenderedPage
+
+
+POLICY = DomainPolicy("x.test", frozenset({"x.test"}))
 
 
 def test_fetch_html_consumes_shared_budget_without_second_request():
@@ -97,6 +101,77 @@ def test_fetch_html_counts_redirect_hops_before_request():
     asyncio.run(run())
 
 
+def test_fetch_html_policy_blocks_offsite_redirect_before_target_request():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            if request.url.host == "x.test":
+                return httpx.Response(
+                    302, headers={"location": "https://outside.test/secret"}
+                )
+            raise AssertionError("站外目标不得发出请求")
+
+        budget = BudgetManager(initial_pages=5, max_pages=5)
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            fetcher = DiscoveryFetcher(
+                client, budget, stats, policy=POLICY
+            )
+            assert await fetcher.fetch_html_page(
+                "https://x.test/start"
+            ) is None
+
+        assert requested == ["https://x.test/start"]
+        assert budget.used_html_pages == 1
+        assert all("outside.test" not in warning for warning in stats.warnings)
+
+    asyncio.run(run())
+
+
+def test_fetch_html_page_returns_allowed_redirect_final_url():
+    async def run():
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(str(request.url))
+            if request.url.path == "/start":
+                return httpx.Response(302, headers={"location": "/article"})
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<main>正文关键字</main>",
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            fetcher = DiscoveryFetcher(
+                client,
+                BudgetManager(initial_pages=5, max_pages=5),
+                DiscoveryStats(),
+                policy=POLICY,
+            )
+            page = await fetcher.fetch_html_page(
+                "https://x.test/start"
+            )
+
+        assert page == FetchedHtml(
+            "<main>正文关键字</main>", "https://x.test/article"
+        )
+        assert requested == [
+            "https://x.test/start",
+            "https://x.test/article",
+        ]
+
+    asyncio.run(run())
+
+
 def test_non_html_is_recorded_without_crashing():
     async def run():
         transport = httpx.MockTransport(
@@ -141,6 +216,53 @@ def test_fetch_rendered_shares_budget_and_counts_only_success(monkeypatch):
         assert budget.used_html_pages == 1
         assert stats.rendered_pages == 1
         assert stats.partial is True
+
+    asyncio.run(run())
+
+
+def test_fetch_rendered_page_enforces_policy_and_returns_final_url(monkeypatch):
+    async def run():
+        attempted: list[str] = []
+
+        async def fake_render_result(
+            url: str, *, navigation_allowed, reserve_request
+        ):
+            attempted.append(url)
+            assert navigation_allowed("https://x.test/final")
+            assert not navigation_allowed("https://outside.test/secret")
+            assert reserve_request()
+            return RenderedPage(
+                "<main>rendered</main>",
+                ["https://x.test/article"],
+                "https://x.test/final",
+            )
+
+        monkeypatch.setattr(
+            "renderer.render_page_result", fake_render_result
+        )
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient() as client:
+            fetcher = DiscoveryFetcher(
+                client,
+                BudgetManager(initial_pages=2, max_pages=2),
+                stats,
+                policy=POLICY,
+            )
+            page = await fetcher.fetch_rendered_page(
+                "https://x.test/start"
+            )
+            denied = await fetcher.fetch_rendered_page(
+                "https://outside.test/direct"
+            )
+
+        assert page == RenderedPage(
+            "<main>rendered</main>",
+            ["https://x.test/article"],
+            "https://x.test/final",
+        )
+        assert denied is None
+        assert attempted == ["https://x.test/start"]
+        assert stats.rendered_pages == 1
 
     asyncio.run(run())
 

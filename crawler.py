@@ -167,8 +167,9 @@ async def fetch_html_response(
     client: httpx.AsyncClient,
     url: str,
     reserve_request: Callable[[], bool] | None = None,
+    redirect_allowed: Callable[[str], bool] | None = None,
 ) -> FetchedHtml:
-    if reserve_request is None:
+    if reserve_request is None and redirect_allowed is None:
         response = await client.get(url)
         return _html_from_response(response)
 
@@ -180,9 +181,15 @@ async def fetch_html_response(
             current_url, follow_redirects=False
         )
         if response.is_redirect and response.headers.get("location"):
-            current_url = urljoin(
+            next_url = urljoin(
                 str(response.url), response.headers["location"]
             )
+            if (
+                redirect_allowed is not None
+                and not redirect_allowed(next_url)
+            ):
+                raise UnsafeRedirect("重定向到站外地址")
+            current_url = next_url
             continue
         return _html_from_response(response)
     raise httpx.TooManyRedirects(
@@ -195,10 +202,13 @@ async def fetch_html(
     client: httpx.AsyncClient,
     url: str,
     reserve_request: Callable[[], bool] | None = None,
+    redirect_allowed: Callable[[str], bool] | None = None,
 ) -> str:
     """Fetch HTML while preserving the historical string return contract."""
     return (
-        await fetch_html_response(client, url, reserve_request)
+        await fetch_html_response(
+            client, url, reserve_request, redirect_allowed
+        )
     ).html
 
 
@@ -277,6 +287,7 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
                            base_delay: float = 1.5,
                            include_final_url: bool = False,
                            reserve_request: Callable[[], bool] | None = None,
+                           redirect_allowed: Callable[[str], bool] | None = None,
                            ) -> str | FetchedHtml:
     """带重试的页面抓取：政府站 WAF 常间歇性拒连/掐断响应/偶发 5xx，
     瞬时失败用指数退避重试（1.5s/3s/6s），非瞬时错误（4xx、非 HTML）
@@ -287,9 +298,11 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
         try:
             if include_final_url:
                 return await fetch_html_response(
-                    client, url, reserve_request
+                    client, url, reserve_request, redirect_allowed
                 )
-            return await fetch_html(client, url, reserve_request)
+            return await fetch_html(
+                client, url, reserve_request, redirect_allowed
+            )
         except RETRYABLE_TRANSPORT as exc:
             last_exc = exc
         except httpx.HTTPStatusError as exc:

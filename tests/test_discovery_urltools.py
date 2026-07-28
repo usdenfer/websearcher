@@ -145,6 +145,40 @@ def test_declared_search_subdomain_can_extend_generic_policy():
     assert registrable_domain("WWW.Example.Co.UK.") == "example.co.uk"
 
 
+def test_empty_declared_urls_keep_generic_policy_strict():
+    policy = DomainPolicy(
+        "www.example.test",
+        frozenset({"www.example.test"}),
+    )
+
+    extended = extend_policy_with_declared_urls(policy, [])
+
+    assert extended == policy
+    assert extended.allow_related_hosts is False
+    assert not url_allowed(
+        "https://content.example.test/article.html", extended
+    )
+
+
+def test_same_host_declared_search_can_enable_related_content_host():
+    policy = DomainPolicy(
+        "www.example.test",
+        frozenset({"www.example.test"}),
+    )
+
+    extended = extend_policy_with_declared_urls(
+        policy, ["https://www.example.test/search?q=term"]
+    )
+
+    assert extended.allow_related_hosts is True
+    assert url_allowed(
+        "https://content.example.test/article.html", extended
+    )
+    assert not url_allowed(
+        "https://ads.example.test/article.html", extended
+    )
+
+
 def test_registrable_domain_supports_known_multipart_suffixes():
     assert registrable_domain("news.example.gov.cn") == "example.gov.cn"
     assert registrable_domain("a.b.example.com.au") == "example.com.au"
