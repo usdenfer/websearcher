@@ -62,7 +62,7 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             data = response.json()
         print(summarize_response(data))
         return 0
-    except (httpx.HTTPError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         print(f"冒烟验证失败：{type(exc).__name__}", file=sys.stderr)
         return 1
 
