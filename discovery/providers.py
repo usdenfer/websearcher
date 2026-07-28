@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from urllib.parse import (
     parse_qsl,
     urlencode,
@@ -114,20 +115,41 @@ class SearchProvider(Provider):
                 if loaded is None:
                     continue
                 html, final_url = loaded
-                self._append_candidates(
-                    result,
-                    seen,
-                    parse_result_candidates(
-                        html,
-                        final_url,
-                        self.policy,
-                        spec.source,
-                        keyword,
-                    ),
-                )
-                for page_url in parse_pagination(
-                    html, final_url, self.policy
-                )[:9]:
+                initial_url = normalize_candidate_url(final_url)
+                visited_pages = {initial_url} if initial_url else set()
+                page_queue: deque[str] = deque()
+
+                def process_page(page_html: str, page_url: str) -> None:
+                    pagination_urls = parse_pagination(
+                        page_html, page_url, self.policy
+                    )
+                    pagination_set = set(pagination_urls)
+                    self._append_candidates(
+                        result,
+                        seen,
+                        [
+                            item
+                            for item in parse_result_candidates(
+                                page_html,
+                                page_url,
+                                self.policy,
+                                spec.source,
+                                keyword,
+                            )
+                            if item.url not in pagination_set
+                        ],
+                    )
+                    for pagination_url in pagination_urls:
+                        normalized = normalize_candidate_url(pagination_url)
+                        if normalized and normalized not in visited_pages:
+                            visited_pages.add(normalized)
+                            page_queue.append(normalized)
+
+                process_page(html, final_url)
+                additional_requests = 0
+                while page_queue and additional_requests < 9:
+                    page_url = page_queue.popleft()
+                    additional_requests += 1
                     page = await self.get_text(
                         page_url,
                         limit=10,
@@ -136,17 +158,7 @@ class SearchProvider(Provider):
                     if page is None:
                         continue
                     page_html, page_final_url = page
-                    self._append_candidates(
-                        result,
-                        seen,
-                        parse_result_candidates(
-                            page_html,
-                            page_final_url,
-                            self.policy,
-                            spec.source,
-                            keyword,
-                        ),
-                    )
+                    process_page(page_html, page_final_url)
         return result
 
     @staticmethod
@@ -255,23 +267,48 @@ class CategoryProvider(Provider):
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         result: list[Candidate] = []
         seen: set[str] = set()
+        visited_pages: set[str] = set()
+        additional_requests = 0
         keyword = keywords[0] if keywords else ""
         for url in self.category_urls[:8]:
+            normalized_root = normalize_candidate_url(url)
+            if not normalized_root or normalized_root in visited_pages:
+                continue
+            visited_pages.add(normalized_root)
             loaded = await self.get_text(url, limit=20)
             if loaded is None:
                 continue
             body, final_url = loaded
-            page_urls = parse_pagination(body, final_url, self.policy)[:12]
-            page_url_set = set(page_urls)
-            batch = parse_result_candidates(
-                body,
-                final_url,
-                self.policy,
-                self.source,
-                keyword,
-            )
-            batch = [item for item in batch if item.url not in page_url_set]
-            self._append_candidates(result, seen, batch)
+            normalized_final = normalize_candidate_url(final_url)
+            if normalized_final:
+                visited_pages.add(normalized_final)
+            page_queue: deque[str] = deque()
+
+            def process_page(page_body: str, page_url: str) -> list[Candidate]:
+                pagination_urls = parse_pagination(
+                    page_body, page_url, self.policy
+                )
+                pagination_set = set(pagination_urls)
+                batch = [
+                    item
+                    for item in parse_result_candidates(
+                        page_body,
+                        page_url,
+                        self.policy,
+                        self.source,
+                        keyword,
+                    )
+                    if item.url not in pagination_set
+                ]
+                self._append_candidates(result, seen, batch)
+                for pagination_url in pagination_urls:
+                    normalized = normalize_candidate_url(pagination_url)
+                    if normalized and normalized not in visited_pages:
+                        visited_pages.add(normalized)
+                        page_queue.append(normalized)
+                return batch
+
+            batch = process_page(body, final_url)
             if (
                 (not batch or looks_js_driven(body))
                 and self.render_mode != "off"
@@ -315,31 +352,14 @@ class CategoryProvider(Provider):
                     self._append_candidates(
                         result, seen, rendered_candidates
                     )
-            for page_url in page_urls:
+            while page_queue and additional_requests < 12:
+                page_url = page_queue.popleft()
+                additional_requests += 1
                 page = await self.get_text(page_url, limit=20)
                 if page is None:
                     continue
                 page_body, page_final_url = page
-                pagination_urls = set(
-                    parse_pagination(
-                        page_body, page_final_url, self.policy
-                    )
-                )
-                self._append_candidates(
-                    result,
-                    seen,
-                    [
-                        item
-                        for item in parse_result_candidates(
-                            page_body,
-                            page_final_url,
-                            self.policy,
-                            self.source,
-                            keyword,
-                        )
-                        if item.url not in pagination_urls
-                    ],
-                )
+                process_page(page_body, page_final_url)
         return result
 
     @staticmethod

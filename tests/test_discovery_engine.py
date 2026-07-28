@@ -109,6 +109,15 @@ def test_rank_prioritizes_score_and_enforces_source_and_section_limits():
     }
 
 
+def test_rank_does_not_group_candidates_with_empty_sections():
+    items = [
+        Candidate(f"https://x.test/{index}", "sitemap", score=100 - index)
+        for index in range(3)
+    ]
+
+    assert rank_candidates(items, per_section=1) == items
+
+
 def test_structured_candidates_do_not_depend_on_bfs_depth():
     candidate = Candidate(
         "https://x.test/archive/2000/deep.html",
@@ -609,14 +618,11 @@ def test_live_budget_after_providers_controls_initial_and_expanded_fetches(
 def test_default_budget_caps_150_candidates_at_120_pages_including_base(
     monkeypatch,
 ):
-    import discovery.engine as engine
-
     candidates = [
         Candidate(
             f"https://x.test/archive/{index}.html",
             "sitemap",
             score=100,
-            section=f"section-{index}",
         )
         for index in range(150)
     ]
@@ -624,7 +630,6 @@ def test_default_budget_caps_150_candidates_at_120_pages_including_base(
         monkeypatch,
         batches={"sitemap": candidates},
     )
-    monkeypatch.setattr(engine, "rank_candidates", lambda items: items)
 
     base = CrawlResult(
         pages=[CrawledPage("https://x.test/", "<html>home</html>")]

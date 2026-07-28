@@ -69,22 +69,31 @@ def merge_candidates(items: list[Candidate]) -> list[Candidate]:
 
 def rank_candidates(
     items: list[Candidate],
-    per_source: int = 40,
-    per_section: int = 40,
+    per_source: int | None = None,
+    per_section: int | None = None,
 ) -> list[Candidate]:
-    """Rank by relevance while bounding any one source or section."""
+    """Rank by relevance, applying only explicitly requested quotas."""
     ranked = sorted(items, key=lambda item: (-item.score, item.url))
     source_counts: dict[str, int] = {}
     section_counts: dict[str, int] = {}
     result: list[Candidate] = []
     for item in ranked:
-        section = item.section or "_"
-        if source_counts.get(item.source, 0) >= per_source:
+        if (
+            per_source is not None
+            and source_counts.get(item.source, 0) >= per_source
+        ):
             continue
-        if section_counts.get(section, 0) >= per_section:
+        if (
+            item.section
+            and per_section is not None
+            and section_counts.get(item.section, 0) >= per_section
+        ):
             continue
         source_counts[item.source] = source_counts.get(item.source, 0) + 1
-        section_counts[section] = section_counts.get(section, 0) + 1
+        if item.section:
+            section_counts[item.section] = (
+                section_counts.get(item.section, 0) + 1
+            )
         result.append(item)
     return result
 

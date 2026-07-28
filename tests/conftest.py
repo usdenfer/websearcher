@@ -79,6 +79,15 @@ class _DiscoverySiteHandler(http.server.BaseHTTPRequestHandler):
             if page == "2":
                 self._send_html("""
                     <html><head><title>公告栏目第二页</title></head><body>
+                      <main><a class="page" href="/category?page=3">
+                        下一页
+                      </a></main>
+                    </body></html>
+                """)
+                return
+            if page == "3":
+                self._send_html("""
+                    <html><head><title>公告栏目第三页</title></head><body>
                       <main><article>
                         <a href="/deep/article.html">普通公告</a>
                       </article></main>
