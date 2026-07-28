@@ -94,6 +94,21 @@ def test_parses_result_candidates_and_pagination():
     ]
 
 
+def test_numeric_article_title_is_not_pagination_without_page_context():
+    html = """
+    <main>
+      <article><a href="/article-2026.html">2026</a></article>
+      <a href="?q=alpha&page=2">2</a>
+    </main>
+    """
+
+    assert parse_pagination(
+        html,
+        "https://example.test/search?q=alpha",
+        POLICY,
+    ) == ["https://example.test/search?page=2&q=alpha"]
+
+
 def test_result_parser_falls_back_to_all_anchors_without_result_containers():
     candidates = parse_result_candidates(
         '<a href="/article/1.html">Alpha</a><a href="/a.pdf">PDF</a>',

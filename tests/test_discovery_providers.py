@@ -109,7 +109,7 @@ def test_search_provider_follows_deep_pagination_without_cycles():
                 html = """
                 <main>
                   <a class="page" href="?q=alpha&page=2">上一页</a>
-                  <article><a href="/deep.html">深页正文 alpha</a></article>
+                  <article><a href="/article-2026.html">2026</a></article>
                 </main>
                 """
             return httpx.Response(200, text=html)
@@ -126,7 +126,7 @@ def test_search_provider_follows_deep_pagination_without_cycles():
             ).discover(["alpha"])
 
         assert [item.url for item in result] == [
-            "https://x.test/deep.html"
+            "https://x.test/article-2026.html"
         ]
         assert [
             httpx.URL(url).params.get("page", "1") for url in requested
@@ -310,7 +310,7 @@ def test_category_provider_follows_deep_pagination_without_cycles():
                 html = """
                 <main>
                   <a class="page" href="?page=2">上一页</a>
-                  <article><a href="/deep.html">深页正文</a></article>
+                  <article><a href="/article-2026.html">2026</a></article>
                 </main>
                 """
             return httpx.Response(200, text=html)
@@ -328,11 +328,66 @@ def test_category_provider_follows_deep_pagination_without_cycles():
             ).discover(["alpha"])
 
         assert [item.url for item in result] == [
-            "https://x.test/deep.html"
+            "https://x.test/article-2026.html"
         ]
         assert [
             httpx.URL(url).params.get("page", "1") for url in requested
         ] == ["1", "2", "3"]
+
+    asyncio.run(run())
+
+
+def test_category_unconsumed_pagination_does_not_hide_later_category_root():
+    async def run():
+        requested_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_paths.append(request.url.path)
+            if request.url.path == "/category-a":
+                links = "".join(
+                    f'<a class="page" href="/extra-{index}">{index}</a>'
+                    for index in range(12)
+                )
+                return httpx.Response(
+                    200,
+                    text=(
+                        f"<main>{links}"
+                        '<a class="page" href="/category-b">下一页</a>'
+                        "</main>"
+                    ),
+                )
+            if request.url.path == "/category-b":
+                return httpx.Response(
+                    200,
+                    text=(
+                        '<main><article><a href="/article.html">'
+                        "来自栏目 B</a></article></main>"
+                    ),
+                )
+            return httpx.Response(200, text="<main></main>")
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await CategoryProvider(
+                client,
+                BudgetManager(),
+                DiscoveryStats(),
+                POLICY,
+                [
+                    "https://x.test/category-a",
+                    "https://x.test/category-b",
+                ],
+                render_mode="off",
+            ).discover(["alpha"])
+
+        assert requested_paths.count("/category-b") == 1
+        assert sum(
+            path.startswith("/extra-") for path in requested_paths
+        ) == 12
+        assert [item.url for item in result] == [
+            "https://x.test/article.html"
+        ]
 
     asyncio.run(run())
 

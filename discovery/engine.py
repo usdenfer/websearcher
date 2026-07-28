@@ -69,10 +69,10 @@ def merge_candidates(items: list[Candidate]) -> list[Candidate]:
 
 def rank_candidates(
     items: list[Candidate],
-    per_source: int | None = None,
-    per_section: int | None = None,
+    per_source: int | None = 40,
+    per_section: int | None = 40,
 ) -> list[Candidate]:
-    """Rank by relevance, applying only explicitly requested quotas."""
+    """Rank by relevance with configurable source and section quotas."""
     ranked = sorted(items, key=lambda item: (-item.score, item.url))
     source_counts: dict[str, int] = {}
     section_counts: dict[str, int] = {}
@@ -239,7 +239,11 @@ async def discover_pages(
                 continue
             all_candidates.extend(batch)
 
-        ranked = rank_candidates(merge_candidates(all_candidates))
+        ranked = rank_candidates(
+            merge_candidates(all_candidates),
+            per_source=None,
+            per_section=None,
+        )
         visited = {
             normalize_candidate_url(page.url)
             for page in base_result.pages

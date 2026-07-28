@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urljoin, urlsplit
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
@@ -35,6 +35,23 @@ CATEGORY_WORDS = (
 SCRIPT_SEARCH_RE = re.compile(
     r"""(?P<quote>['"])(?P<url>[^'"]*(?:search|find|query)[^'"]*?)"""
     r"""\?(?P<param>q|s|key|keyword|keywords|query|searchContent)=""",
+    re.IGNORECASE,
+)
+PAGINATION_PARAMS = {
+    "page",
+    "p",
+    "currpage",
+    "currentpage",
+    "pageindex",
+    "pageno",
+}
+PAGINATION_PATH_RE = re.compile(
+    r"(?:^|[/_-])(?:page|p)(?:[/_-]?\d+)(?:\.[a-z0-9]+)?/?$",
+    re.IGNORECASE,
+)
+PAGINATION_MARKER_RE = re.compile(
+    r"(?:^|[\s_-])(?:pagination|pager|pages?|page[-_]?nav)"
+    r"(?:$|[\s_-])",
     re.IGNORECASE,
 )
 
@@ -216,14 +233,57 @@ def parse_pagination(
     result: list[str] = []
     for anchor in soup.find_all("a", href=True):
         text = anchor.get_text(" ", strip=True)
-        classes = " ".join(str(item) for item in anchor.get("class", []))
+        marker_text = " ".join(
+            [
+                str(anchor.get("id", "")),
+                *(str(item) for item in anchor.get("class", [])),
+            ]
+        )
+        has_page_marker = bool(PAGINATION_MARKER_RE.search(marker_text))
+        href = str(anchor["href"])
+        try:
+            href_parts = urlsplit(href)
+            has_page_param = any(
+                key.lower() in PAGINATION_PARAMS
+                for key, _value in parse_qsl(
+                    href_parts.query, keep_blank_values=True
+                )
+            )
+            has_page_path = bool(
+                PAGINATION_PATH_RE.search(href_parts.path)
+            )
+        except (UnicodeError, ValueError):
+            has_page_param = False
+            has_page_path = False
+        ancestor = anchor.find_parent(
+            lambda tag: tag.name == "nav"
+            or bool(
+                PAGINATION_MARKER_RE.search(
+                    " ".join(
+                        [
+                            str(tag.get("id", "")),
+                            *(
+                                str(item)
+                                for item in tag.get("class", [])
+                            ),
+                        ]
+                    )
+                )
+            )
+        )
+        numeric_with_context = text.isdigit() and (
+            has_page_marker
+            or ancestor is not None
+            or has_page_param
+            or has_page_path
+        )
         if not (
-            text in {"下一页", "下页", ">", "»"}
-            or text.isdigit()
-            or "page" in classes.lower()
+            text in {"下一页", "下页", "上一页", "上页", ">", "»", "<", "«"}
+            or numeric_with_context
+            or has_page_marker
         ):
             continue
-        url = _safe_absolute_url(base_url, anchor["href"])
+        url = _safe_absolute_url(base_url, href)
         if url and url_allowed(url, policy) and url not in result:
             result.append(url)
     return result

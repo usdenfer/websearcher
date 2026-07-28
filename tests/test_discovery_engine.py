@@ -118,6 +118,23 @@ def test_rank_does_not_group_candidates_with_empty_sections():
     assert rank_candidates(items, per_section=1) == items
 
 
+def test_rank_public_defaults_limit_sources_but_none_disables_quotas():
+    items = [
+        Candidate(
+            f"https://x.test/{index}",
+            "sitemap",
+            score=100,
+            section=f"section-{index}",
+        )
+        for index in range(41)
+    ]
+
+    assert len(rank_candidates(items)) == 40
+    assert len(
+        rank_candidates(items, per_source=None, per_section=None)
+    ) == 41
+
+
 def test_structured_candidates_do_not_depend_on_bfs_depth():
     candidate = Candidate(
         "https://x.test/archive/2000/deep.html",

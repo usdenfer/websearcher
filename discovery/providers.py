@@ -283,6 +283,7 @@ class CategoryProvider(Provider):
             if normalized_final:
                 visited_pages.add(normalized_final)
             page_queue: deque[str] = deque()
+            queued_pages: set[str] = set()
 
             def process_page(page_body: str, page_url: str) -> list[Candidate]:
                 pagination_urls = parse_pagination(
@@ -303,8 +304,12 @@ class CategoryProvider(Provider):
                 self._append_candidates(result, seen, batch)
                 for pagination_url in pagination_urls:
                     normalized = normalize_candidate_url(pagination_url)
-                    if normalized and normalized not in visited_pages:
-                        visited_pages.add(normalized)
+                    if (
+                        normalized
+                        and normalized not in visited_pages
+                        and normalized not in queued_pages
+                    ):
+                        queued_pages.add(normalized)
                         page_queue.append(normalized)
                 return batch
 
@@ -354,6 +359,10 @@ class CategoryProvider(Provider):
                     )
             while page_queue and additional_requests < 12:
                 page_url = page_queue.popleft()
+                queued_pages.discard(page_url)
+                if page_url in visited_pages:
+                    continue
+                visited_pages.add(page_url)
                 additional_requests += 1
                 page = await self.get_text(page_url, limit=20)
                 if page is None:
