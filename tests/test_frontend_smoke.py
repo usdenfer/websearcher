@@ -153,7 +153,8 @@ def test_warning_formatter_hides_sensitive_details(app_server):
           formatDiscoveryWarning(
             "https://user:password@example.test/path?token=secret: ConnectError"
           ),
-          formatDiscoveryWarning("api: timeout token=secret")
+          formatDiscoveryWarning("api: timeout token=secret"),
+          formatDiscoveryWarning("secret-token: TimeoutException")
         ]""")
 
         assert formatted == [
@@ -161,7 +162,8 @@ def test_warning_formatter_hides_sensitive_details(app_server):
             "",
             "feed: RuntimeError",
             "discovery: 处理失败",
-            "api: 请求超时",
+            "discovery: 请求超时",
+            "discovery: TimeoutException",
         ]
         assert "secret" not in " ".join(formatted)
         assert "https://" not in " ".join(formatted)
