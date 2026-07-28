@@ -204,7 +204,10 @@ def test_category_empty_keywords_and_cross_page_duplicates_are_safe():
     async def run():
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.params.get("page") == "2":
-                body = """<main><a href="/same">same</a></main>"""
+                body = """
+                <main><a href="/same">same</a></main>
+                <a class="page" href="?page=3">下一页</a>
+                """
             else:
                 body = """
                 <main><a href="/same">same</a></main>
@@ -256,6 +259,86 @@ def test_provider_budget_rejection_avoids_request_and_marks_html_partial():
         assert calls == 0
         assert stats.partial is True
         assert budget.provider_requests == {"site-search": 1}
+
+    asyncio.run(run())
+
+
+def test_freecms_id_detection_uses_exact_query_key():
+    async def run():
+        rows = [
+            {
+                "pageUrl": "/grid/view?grid=1&otherid=7",
+                "id": "42",
+                "title": "grid",
+            },
+            {
+                "pageUrl": "/existing/view?id=99",
+                "id": "42",
+                "title": "existing",
+            },
+        ]
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text=json.dumps({"code": 200, "data": {"rows": rows}}),
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                DiscoveryStats(),
+                POLICY,
+                FreeCmsAdapter("https://x.test/start"),
+            ).discover(["alpha"])
+
+        assert [item.url for item in result] == [
+            "https://x.test/grid/view?grid=1&id=42&otherid=7",
+            "https://x.test/existing/view?id=99",
+        ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("responses", "expected_success"),
+    [
+        ([200, 500], True),
+        ([500, 200], True),
+        ([500, 500], False),
+    ],
+)
+def test_freecms_business_success_is_independent_of_keyword_order(
+    responses,
+    expected_success,
+):
+    async def run():
+        response_codes = iter(responses)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            code = next(response_codes)
+            payload = (
+                {"code": 200, "data": {"rows": []}}
+                if code == 200
+                else {"code": 500, "msg": "rejected"}
+            )
+            return httpx.Response(200, text=json.dumps(payload))
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                FreeCmsAdapter("https://x.test/start"),
+            ).discover(["first", "second"])
+
+        assert (
+            "site-search-api" in stats.sources_succeeded
+        ) is expected_success
 
     asyncio.run(run())
 

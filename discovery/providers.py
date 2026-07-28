@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import urlencode, urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
 
 import httpx
 
@@ -283,16 +283,25 @@ class CategoryProvider(Provider):
                 if page is None:
                     continue
                 page_body, page_final_url = page
+                pagination_urls = set(
+                    parse_pagination(
+                        page_body, page_final_url, self.policy
+                    )
+                )
                 self._append_candidates(
                     result,
                     seen,
-                    parse_result_candidates(
-                        page_body,
-                        page_final_url,
-                        self.policy,
-                        self.source,
-                        keyword,
-                    ),
+                    [
+                        item
+                        for item in parse_result_candidates(
+                            page_body,
+                            page_final_url,
+                            self.policy,
+                            self.source,
+                            keyword,
+                        )
+                        if item.url not in pagination_urls
+                    ],
                 )
         return result
 
@@ -325,6 +334,8 @@ class FreeCmsApiProvider(Provider):
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         result: list[Candidate] = []
         seen: set[str] = set()
+        source_was_successful = self.source in self.stats.sources_succeeded
+        business_success = False
         spec = self.adapter.search_specs()[0]
         for keyword in keywords[:6]:
             loaded = await self.get_text(
@@ -338,16 +349,22 @@ class FreeCmsApiProvider(Provider):
             body, _final_url = loaded
             ok, rows, warning = self.adapter.parse_api_response(body)
             if not ok:
-                self.stats.sources_succeeded.discard(self.source)
                 self.stats.warnings.append(f"{self.source}: {warning}")
                 continue
+            business_success = True
             for row in rows:
                 raw = str(row.get("pageUrl") or "")
                 if not raw:
                     continue
                 candidate_url = urljoin(self.adapter.origin + "/", raw)
                 item_id = row.get("id")
-                if item_id and "id=" not in candidate_url:
+                query_keys = {
+                    key for key, _value in parse_qsl(
+                        urlsplit(candidate_url).query,
+                        keep_blank_values=True,
+                    )
+                }
+                if item_id and "id" not in query_keys:
                     separator = "&" if "?" in candidate_url else "?"
                     candidate_url += separator + urlencode({"id": item_id})
                 candidate_url = normalize_candidate_url(candidate_url)
@@ -370,6 +387,10 @@ class FreeCmsApiProvider(Provider):
                         else 75,
                     )
                 )
+        if source_was_successful or business_success:
+            self.stats.sources_succeeded.add(self.source)
+        else:
+            self.stats.sources_succeeded.discard(self.source)
         return result
 
 
