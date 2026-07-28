@@ -475,6 +475,44 @@ def test_discovery_uses_static_final_urls_and_deduplicates_redirects(
     assert result.stats.candidates_fetched == 1
 
 
+def test_discovery_keeps_exact_three_parameter_fetcher_double_compatible(
+    monkeypatch,
+):
+    import discovery.engine as engine
+
+    context, _providers, _fetchers = _install_engine_fakes(monkeypatch)
+    constructed: list[object] = []
+
+    class ExactThreeParameterFetcher:
+        def __init__(self, client, budget, stats):
+            assert client is context.client
+            self.budget = budget
+            self.stats = stats
+            constructed.append(self)
+
+        async def fetch_html(self, url):
+            raise AssertionError("此场景没有正文候选")
+
+    monkeypatch.setattr(
+        engine, "DiscoveryFetcher", ExactThreeParameterFetcher
+    )
+
+    result = _run(
+        discover_pages(
+            "https://x.test/",
+            [],
+            CrawlResult(
+                pages=[CrawledPage("https://x.test/", "<html></html>")]
+            ),
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    assert len(constructed) == 1
+    assert result.pages == []
+
+
 def test_redirected_homepage_url_drives_all_site_discovery(monkeypatch):
     actual_home = "https://www.new.test/sub/"
     fresh = Candidate(

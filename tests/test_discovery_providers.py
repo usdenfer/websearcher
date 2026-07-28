@@ -454,6 +454,57 @@ def test_category_rendering_uses_render_final_url_for_self_and_pagination():
     asyncio.run(run())
 
 
+def test_category_rendering_excludes_request_static_and_render_self_urls():
+    async def run():
+        class ThreeStageFetcher:
+            async def fetch_rendered_page(self, url):
+                assert url == "https://x.test/static/category"
+                return __import__(
+                    "renderer", fromlist=["RenderedPage"]
+                ).RenderedPage(
+                    "<main>rendered</main>",
+                    [
+                        "https://x.test/request/category",
+                        "https://x.test/static/category",
+                        "https://x.test/render/category",
+                        "article.html",
+                    ],
+                    "https://x.test/render/category",
+                )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/request/category":
+                return httpx.Response(
+                    302,
+                    headers={"location": "/static/category"},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<div id='app'></div>",
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await CategoryProvider(
+                client,
+                BudgetManager(),
+                DiscoveryStats(),
+                POLICY,
+                ["https://x.test/request/category"],
+                fetcher=ThreeStageFetcher(),
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://x.test/render/article.html"
+        ]
+
+    asyncio.run(run())
+
+
 def test_category_empty_keywords_and_cross_page_duplicates_are_safe():
     async def run():
         def handler(request: httpx.Request) -> httpx.Response:

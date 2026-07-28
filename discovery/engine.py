@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -233,9 +234,25 @@ async def discover_pages(
     origin = _safe_origin(effective_start_url)
 
     async with make_client() as client:
-        fetcher = DiscoveryFetcher(
-            client, budget, stats, policy=policy
+        try:
+            fetcher_parameters = inspect.signature(
+                DiscoveryFetcher
+            ).parameters
+        except (TypeError, ValueError):
+            fetcher_parameters = {}
+        supports_policy = (
+            "policy" in fetcher_parameters
+            or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in fetcher_parameters.values()
+            )
         )
+        if supports_policy:
+            fetcher = DiscoveryFetcher(
+                client, budget, stats, policy=policy
+            )
+        else:
+            fetcher = DiscoveryFetcher(client, budget, stats)
         providers = [
             SitemapProvider(client, budget, stats, policy, origin),
             FeedProvider(client, budget, stats, policy, feed_urls),

@@ -422,6 +422,7 @@ class CategoryProvider(Provider):
                                 normalize_candidate_url(
                                     rendered_final_url
                                 ),
+                                normalize_candidate_url(final_url),
                                 normalize_candidate_url(url),
                             ),
                         )
