@@ -29,7 +29,7 @@ from ai import (AIError, ask_prompt, chat_stream, expand_keywords,
                 summarize_prompt)
 from cache import get as cache_get
 from cache import put as cache_put
-from discovery import discover_pages
+from discovery import DiscoveryRun, DiscoveryStats, discover_pages
 from locator import build_locate_page
 from matcher import (
     extract_main_text,
@@ -93,13 +93,21 @@ async def index() -> FileResponse:
 async def _crawl_or_502(url: str, depth: int, render: bool,
                         deadline: float) -> CrawlResult:
     try:
-        return await crawl(
+        result = await crawl(
             url,
             depth=depth,
             max_pages=BASE_BFS_PAGE_BUDGET,
             render=render,
             deadline=deadline,
         )
+        if not result.pages:
+            reason = (
+                result.failed[0]["reason"]
+                if result.failed
+                else "未获取到起始页"
+            )
+            raise HTTPException(502, f"起始页无法访问：{reason}")
+        return result
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             502, f"起始页返回 HTTP {exc.response.status_code}，无法搜索")
@@ -150,15 +158,35 @@ async def search(req: SearchRequest) -> dict:
                     else:
                         auto_note = "已自动尝试渲染补搜，未发现更多结果"
 
-    discovery_run = await discover_pages(
-        req.startUrl,
-        all_keywords,
-        crawl_result,
-        req.depth,
-        req.render,
-        timeout_seconds=SEARCH_BUDGET_SECONDS,
-        started_at=search_started,
-    )
+    try:
+        discovery_run = await discover_pages(
+            req.startUrl,
+            all_keywords,
+            crawl_result,
+            req.depth,
+            req.render,
+            timeout_seconds=SEARCH_BUDGET_SECONDS,
+            started_at=search_started,
+        )
+    except Exception as exc:
+        discovery_run = DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(
+                profile="generic",
+                partial=True,
+                elapsed_ms=max(
+                    0,
+                    int(
+                        (time.monotonic() - search_started)
+                        * 1000
+                    ),
+                ),
+                warnings=[
+                    f"discovery: {type(exc).__name__}"
+                ],
+            ),
+        )
     crawl_result.pages.extend(discovery_run.pages)
     crawl_result.failed.extend(discovery_run.failed)
 

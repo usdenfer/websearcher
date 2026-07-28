@@ -204,6 +204,32 @@ async def gather_before_deadline(coroutines, deadline: float | None):
     return results, bool(pending)
 
 
+async def await_before_deadline(coroutine, deadline: float | None):
+    """Await one operation, preserving its exception unless time runs out."""
+    if deadline is not None and deadline <= time.monotonic():
+        close = getattr(coroutine, "close", None)
+        if close is not None:
+            close()
+        return None, True
+    task = asyncio.create_task(coroutine)
+    timeout = (
+        None
+        if deadline is None
+        else max(0.0, deadline - time.monotonic())
+    )
+    try:
+        done, pending = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    if pending:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return None, True
+    return task.result(), False
+
+
 async def crawl(start_url: str, depth: int = 1,
                 max_pages: int = MAX_TOTAL_PAGES,
                 render: bool = False,
@@ -232,7 +258,16 @@ async def crawl(start_url: str, depth: int = 1,
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT},
     ) as client:
-        start_html = await fetch_html_retry(client, start_url)
+        start_html, deadline_reached = await await_before_deadline(
+            fetch_html_retry(client, start_url),
+            deadline,
+        )
+        if deadline_reached:
+            result.failed.append({
+                "url": start_url,
+                "reason": "搜索截止时间已到",
+            })
+            return result
         start_page = CrawledPage(url=start_url, html=start_html)
         result.pages.append(start_page)
         visited = {normalize_url(start_url)}
@@ -297,9 +332,19 @@ async def _crawl_render(start_url: str, depth: int,
         return normalized
 
     try:
-        start_html, start_links = await renderer.render_page(start_url)
+        start_loaded, deadline_reached = await await_before_deadline(
+            renderer.render_page(start_url),
+            deadline,
+        )
     except renderer.RenderError as exc:
         raise ValueError(str(exc)) from exc
+    if deadline_reached:
+        result.failed.append({
+            "url": start_url,
+            "reason": "搜索截止时间已到",
+        })
+        return result
+    start_html, start_links = start_loaded
     result.pages.append(CrawledPage(url=start_url, html=start_html))
     visited = {start_norm}
     current_level: list[tuple[str, list[str]]] = [(start_url, start_links)]

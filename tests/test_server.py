@@ -1,6 +1,8 @@
 """server.py 的接口测试：端到端搜索、未命中、参数校验、起始页失败。"""
+import asyncio
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 import server
@@ -141,6 +143,93 @@ def test_api_reserves_budget_for_structured_discovery(
     assert args[3:5] == (3, "off")
     assert kwargs["timeout_seconds"] == server.SEARCH_BUDGET_SECONDS
     assert kwargs["started_at"] <= crawl_calls[0]["deadline"]
+
+
+def test_discovery_failure_returns_base_body_results(
+        monkeypatch, site_server):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(
+                url=url,
+                html="<html><main>alpha 基础正文</main></html>",
+            )
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        raise RuntimeError("secret-token-must-not-leak")
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    response = client.post("/api/search", json={
+        "startUrl": f"{site_server}/index.html",
+        "keywords": ["alpha"],
+        "depth": 1,
+        "render": "off",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["totalHits"] == 1
+    assert data["discovery"]["profile"] == "generic"
+    assert data["discovery"]["partial"] is True
+    assert data["discovery"]["elapsedMs"] >= 0
+    assert data["discovery"]["warnings"] == [
+        "discovery: RuntimeError"
+    ]
+    assert "secret-token" not in response.text
+    assert data["siteSearch"] == {
+        "available": False,
+        "linksFound": 0,
+        "pagesFetched": 0,
+        "deprecated": True,
+    }
+
+
+def test_discovery_cancellation_propagates(monkeypatch):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url=url, html="<html><main>alpha</main></html>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    request = server.SearchRequest(
+        startUrl="https://cancel.test/",
+        keywords=["alpha"],
+        depth=1,
+        render="off",
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server.search(request))
+
+
+def test_empty_start_page_result_returns_502(monkeypatch):
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(
+            pages=[],
+            failed=[{"url": url, "reason": "搜索截止时间已到"}],
+        )
+
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    with pytest.raises(server.HTTPException) as raised:
+        asyncio.run(server._crawl_or_502(
+            "https://deadline.test/",
+            depth=1,
+            render=False,
+            deadline=time.monotonic(),
+        ))
+    assert raised.value.status_code == 502
+    assert "搜索截止时间已到" in raised.value.detail
 
 
 def test_search_no_hit(site_server):

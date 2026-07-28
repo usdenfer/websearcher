@@ -133,6 +133,63 @@ def test_render_crawl_forwards_max_pages_and_deadline(monkeypatch):
     assert calls == [("https://render.test/", 3, 17, deadline)]
 
 
+def test_static_start_page_obeys_deadline_and_cancels(monkeypatch):
+    import crawler
+
+    cancelled = []
+
+    async def slow_fetch(client, url, **kwargs):
+        try:
+            await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            cancelled.append(url)
+            raise
+        return "<html><main>late</main></html>"
+
+    monkeypatch.setattr(crawler, "fetch_html_retry", slow_fetch)
+    started = time.monotonic()
+    result = asyncio.run(crawl(
+        "https://slow-static.test/",
+        deadline=started + 0.15,
+    ))
+    assert time.monotonic() - started < 0.3
+    assert result.pages == []
+    assert result.failed == [{
+        "url": "https://slow-static.test/",
+        "reason": "搜索截止时间已到",
+    }]
+    assert cancelled == ["https://slow-static.test/"]
+
+
+def test_render_start_page_obeys_deadline_and_cancels(monkeypatch):
+    import renderer
+
+    cancelled = []
+
+    async def slow_render(url):
+        try:
+            await asyncio.sleep(0.3)
+        except asyncio.CancelledError:
+            cancelled.append(url)
+            raise
+        return "<html><main>late</main></html>", []
+
+    monkeypatch.setattr(renderer, "render_page", slow_render)
+    started = time.monotonic()
+    result = asyncio.run(crawl(
+        "https://slow-render.test/",
+        render=True,
+        deadline=started + 0.02,
+    ))
+    assert time.monotonic() - started < 0.2
+    assert result.pages == []
+    assert result.failed == [{
+        "url": "https://slow-render.test/",
+        "reason": "搜索截止时间已到",
+    }]
+    assert cancelled == ["https://slow-render.test/"]
+
+
 def test_constants():
     assert MAX_SUBPAGES == 30
     assert CONCURRENCY == 8
