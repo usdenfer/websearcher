@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
+
+from discovery.urltools import normalize_candidate_url
 
 MAX_SUBPAGES = 30
 MAX_TOTAL_PAGES = 60
@@ -41,15 +43,7 @@ class CrawlResult:
 
 
 def normalize_url(url: str) -> str:
-    url, _ = urldefrag(url)
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
-    netloc = parts.netloc.lower()
-    path = parts.path
-    if path != "/" and path.endswith("/"):
-        path = path.rstrip("/")
-    return f"{scheme}://{netloc}{path}" + (
-        f"?{parts.query}" if parts.query else "")
+    return normalize_candidate_url(url)
 
 
 def is_binary_url(url: str) -> bool:
