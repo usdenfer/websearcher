@@ -21,6 +21,59 @@ def search(site_server, keywords, path="/index.html"):
     })
 
 
+@pytest.mark.parametrize(
+    "start_url",
+    [
+        "https://zycg.gov.cn/",
+        "https://www.zycg.gov.cn/search",
+    ],
+)
+def test_search_budget_expands_for_zycg_hosts(start_url):
+    started_at = time.monotonic()
+
+    budget = server._search_budget(start_url, False, started_at)
+
+    assert budget.initial_pages == 150
+    assert budget.max_pages == 300
+    assert budget.timeout_seconds == 300
+    assert budget.started_at == started_at
+
+
+@pytest.mark.parametrize(
+    "start_url",
+    [
+        "https://example.com/",
+        "https://evilzycg.gov.cn/",
+        "https://zycg.gov.cn.evil.example/",
+        "https://[broken",
+    ],
+)
+def test_search_budget_uses_generic_limits_for_other_or_invalid_hosts(
+    start_url,
+):
+    started_at = time.monotonic()
+
+    budget = server._search_budget(start_url, False, started_at)
+
+    assert budget.initial_pages == 60
+    assert budget.max_pages == 120
+    assert budget.timeout_seconds == server.SEARCH_BUDGET_SECONDS
+    assert budget.started_at == started_at
+
+
+def test_search_budget_keeps_archive_limits_for_zycg():
+    started_at = time.monotonic()
+
+    budget = server._search_budget(
+        "https://zycg.gov.cn/", True, started_at
+    )
+
+    assert budget.initial_pages == server.ARCHIVE_MAX_PAGES
+    assert budget.max_pages == server.ARCHIVE_MAX_PAGES
+    assert budget.timeout_seconds == server.ARCHIVE_BUDGET_SECONDS
+    assert budget.started_at == started_at
+
+
 def test_search_hit_structure(site_server):
     resp = search(site_server, ["alpha", "beta"])
     assert resp.status_code == 200
@@ -331,6 +384,50 @@ def test_api_reserves_budget_for_structured_discovery(
     assert args[1] == ["alpha"]
     assert args[3:5] == (3, "off")
     assert kwargs["budget"] is crawl_calls[0]["budget"]
+
+
+def test_api_shares_special_zycg_budget_without_expanding_base_bfs(
+    monkeypatch,
+):
+    crawl_calls = []
+    discovery_calls = []
+
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        crawl_calls.append(kwargs)
+        return CrawlResult(pages=[
+            CrawledPage(url=url, html="<html><main>alpha</main></html>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        discovery_calls.append((args, kwargs))
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="freecms"),
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+
+    response = client.post("/api/search", json={
+        "startUrl": "https://search.zycg.gov.cn/",
+        "keywords": ["alpha"],
+        "depth": 3,
+        "render": "off",
+    })
+
+    assert response.status_code == 200
+    crawl_budget = crawl_calls[0]["budget"]
+    discovery_budget = discovery_calls[0][1]["budget"]
+    assert crawl_budget is discovery_budget
+    assert crawl_budget.initial_pages == 150
+    assert crawl_budget.max_pages == 300
+    assert crawl_budget.timeout_seconds == 300
+    assert crawl_calls[0]["max_pages"] == server.BASE_BFS_PAGE_BUDGET
 
 
 def test_discovery_failure_returns_base_body_results(

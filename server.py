@@ -130,17 +130,50 @@ def _match_crawl(crawl_result, all_keywords: list[str]) -> tuple[list, int]:
     return match_body_crawl_result(crawl_result.pages, all_keywords)
 
 
+def _search_budget(
+    start_url: str,
+    archive_mode: bool,
+    started_at: float,
+) -> BudgetManager:
+    if archive_mode:
+        return BudgetManager(
+            initial_pages=ARCHIVE_MAX_PAGES,
+            max_pages=ARCHIVE_MAX_PAGES,
+            timeout_seconds=ARCHIVE_BUDGET_SECONDS,
+            started_at=started_at,
+        )
+    try:
+        hostname = urlsplit(start_url).hostname
+    except (TypeError, UnicodeError, ValueError):
+        hostname = None
+    if hostname is not None:
+        hostname = hostname.lower()
+    if hostname == "zycg.gov.cn" or (
+        hostname is not None
+        and hostname.endswith(".zycg.gov.cn")
+    ):
+        return BudgetManager(
+            initial_pages=150,
+            max_pages=300,
+            timeout_seconds=300,
+            started_at=started_at,
+        )
+    return BudgetManager(
+        initial_pages=60,
+        max_pages=120,
+        timeout_seconds=SEARCH_BUDGET_SECONDS,
+        started_at=started_at,
+    )
+
+
 @app.post("/api/search")
 async def search(req: SearchRequest) -> dict:
     search_started = time.monotonic()
     archive_mode = req.render == "archive"
-    budget = BudgetManager(
-        initial_pages=ARCHIVE_MAX_PAGES if archive_mode else 60,
-        max_pages=ARCHIVE_MAX_PAGES if archive_mode else 120,
-        timeout_seconds=(
-            ARCHIVE_BUDGET_SECONDS if archive_mode
-            else SEARCH_BUDGET_SECONDS),
-        started_at=search_started,
+    budget = _search_budget(
+        req.startUrl,
+        archive_mode,
+        search_started,
     )
     deadline = budget.deadline
     host = urlsplit(req.startUrl).netloc

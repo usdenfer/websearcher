@@ -457,10 +457,18 @@ async def discover_pages(
                 scheduled_count += len(second_batch)
 
         stats.candidates_fetched = len(pages)
+        time_budget_exhausted = budget.expired()
+        html_page_budget_exhausted = (
+            len(pending) > scheduled_count
+        )
+        if time_budget_exhausted:
+            stats.note_stop("time-budget")
+        if html_page_budget_exhausted:
+            stats.note_stop("html-page-budget")
         stats.partial = (
             stats.partial
-            or budget.expired()
-            or len(pending) > scheduled_count
+            or time_budget_exhausted
+            or html_page_budget_exhausted
         )
         stats.elapsed_ms = max(
             0, int((time.monotonic() - budget.started_at) * 1000)

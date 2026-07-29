@@ -1031,6 +1031,7 @@ def test_budget_does_not_expand_for_only_low_value_remaining(monkeypatch):
     assert len(fetchers[0].urls) == 1
     assert result.stats.budget_expanded is False
     assert result.stats.partial is True
+    assert result.stats.stop_reason == "html-page-budget"
 
 
 def test_explicit_zero_started_at_is_preserved_and_prevents_requests(
@@ -1060,6 +1061,7 @@ def test_explicit_zero_started_at_is_preserved_and_prevents_requests(
     assert fetchers[0].urls == []
     assert result.pages == []
     assert result.stats.partial is True
+    assert result.stats.stop_reason == "time-budget"
     assert result.stats.elapsed_ms > 0
 
 
@@ -1143,6 +1145,66 @@ def test_fetch_failure_is_counted_as_found_not_fetched(monkeypatch):
     assert result.stats.candidates_found == 1
     assert result.stats.candidates_fetched == 0
     assert result.candidates == [candidate]
+    assert result.stats.stop_reason is None
+
+
+def test_completed_date_boundary_search_stays_non_partial(monkeypatch):
+    import discovery.engine as engine
+
+    _install_engine_fakes(monkeypatch)
+
+    class DateBoundedSitemap:
+        source = "sitemap"
+
+        def __init__(self, client, budget, stats, policy, *args, **kwargs):
+            self.stats = stats
+
+        async def discover(self, keywords):
+            self.stats.note_stop("date-boundary")
+            return []
+
+    monkeypatch.setattr(engine, "SitemapProvider", DateBoundedSitemap)
+
+    result = _run(discover_pages(
+        "https://x.test/",
+        ["alpha"],
+        CrawlResult(),
+        depth=1,
+        render_mode="off",
+    ))
+
+    assert result.stats.partial is False
+    assert result.stats.stop_reason == "date-boundary"
+
+
+def test_provider_time_stop_is_preserved_when_already_partial(monkeypatch):
+    import discovery.engine as engine
+
+    _install_engine_fakes(monkeypatch)
+
+    class TimeLimitedSitemap:
+        source = "sitemap"
+
+        def __init__(self, client, budget, stats, policy, *args, **kwargs):
+            self.stats = stats
+
+        async def discover(self, keywords):
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+            return []
+
+    monkeypatch.setattr(engine, "SitemapProvider", TimeLimitedSitemap)
+
+    result = _run(discover_pages(
+        "https://x.test/",
+        ["alpha"],
+        CrawlResult(),
+        depth=1,
+        render_mode="off",
+    ))
+
+    assert result.stats.partial is True
+    assert result.stats.stop_reason == "time-budget"
 
 
 def test_elapsed_uses_supplied_start_time(monkeypatch):
