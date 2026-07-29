@@ -18,6 +18,7 @@ from discovery.models import (
     BudgetManager,
     Candidate,
     DomainPolicy,
+    DiscoveryStats,
     SearchSpec,
 )
 
@@ -294,6 +295,11 @@ def _install_engine_fakes(
         engine,
         "FreeCmsApiProvider",
         provider_type("site-search-api"),
+    )
+    monkeypatch.setattr(
+        engine,
+        "FreeCmsRecentProvider",
+        provider_type("freecms-recent"),
     )
     monkeypatch.setattr(
         engine, "YunnanCmsProvider", provider_type("yunnan-search")
@@ -684,6 +690,92 @@ def test_freecms_uses_api_provider_and_keeps_category_fallback(monkeypatch):
     assert result.stats.profile == "freecms"
 
 
+def test_freecms_combines_search_and_recent_recall_before_fetch(monkeypatch):
+    url = "https://www.zycg.gov.cn/news/1.html"
+    search = Candidate(
+        url,
+        "site-search-api",
+        keyword="alpha",
+        title_hint="search title",
+        score=100,
+        source_evidence=("search-form",),
+    )
+    recent = Candidate(
+        url,
+        "freecms-recent",
+        title_hint="recent title",
+        score=75,
+        published_date="2026-07-20",
+        source_evidence=("recent-list",),
+    )
+    _context, provider_records, fetchers = _install_engine_fakes(
+        monkeypatch,
+        batches={
+            "site-search-api": [search],
+            "freecms-recent": [recent],
+        },
+    )
+
+    result = _run(
+        discover_pages(
+            "https://www.zycg.gov.cn/",
+            ["alpha"],
+            CrawlResult(
+                pages=[
+                    CrawledPage(
+                        "https://www.zycg.gov.cn/",
+                        "<html>FreeCMS</html>",
+                    )
+                ]
+            ),
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    sources = [source for source, _provider, _policy in provider_records]
+    assert "site-search-api" in sources
+    assert "freecms-recent" in sources
+    assert {
+        "site-search-api",
+        "freecms-recent",
+    }.issubset(result.stats.sources_tried)
+    assert fetchers[0].urls == [url]
+    assert len(result.candidates) == 1
+    assert result.candidates[0].source_evidence == (
+        "freecms-recent",
+        "recent-list",
+        "search-form",
+        "site-search-api",
+    )
+    assert result.candidates[0].published_date == "2026-07-20"
+
+
+def test_generic_adapter_does_not_construct_freecms_recent(monkeypatch):
+    _context, provider_records, _fetchers = _install_engine_fakes(monkeypatch)
+
+    _run(
+        discover_pages(
+            "https://x.test/",
+            [],
+            CrawlResult(
+                pages=[CrawledPage("https://x.test/", "<html></html>")]
+            ),
+            depth=1,
+            render_mode="off",
+        )
+    )
+
+    sources = [source for source, _provider, _policy in provider_records]
+    assert "freecms-recent" not in sources
+
+
+def test_discovery_run_three_parameter_constructor_defaults_candidates():
+    run = DiscoveryRun([], [], DiscoveryStats())
+
+    assert run.candidates == []
+
+
 def test_yunnan_adapter_uses_yunnan_provider(monkeypatch):
     import discovery.engine as engine
 
@@ -747,6 +839,10 @@ def test_discover_pages_excludes_visited_normalized_urls(monkeypatch):
     assert [page.url for page in result.pages] == [fresh.url]
     assert result.stats.candidates_found == 1
     assert fetchers[0].urls == [fresh.url]
+    assert [item.url for item in result.candidates] == [
+        "https://x.test/a?a=1&b=2",
+        fresh.url,
+    ]
 
 
 def test_skip_urls_are_not_fetched_or_charged_to_html_budget(monkeypatch):
@@ -1028,6 +1124,7 @@ def test_fetch_failure_is_counted_as_found_not_fetched(monkeypatch):
     assert fetchers[0].urls == [candidate.url, candidate.url]
     assert result.stats.candidates_found == 1
     assert result.stats.candidates_fetched == 0
+    assert result.candidates == [candidate]
 
 
 def test_elapsed_uses_supplied_start_time(monkeypatch):

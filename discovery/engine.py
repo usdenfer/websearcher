@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from crawler import CrawledPage, CrawlResult
@@ -29,6 +29,7 @@ from discovery.providers import (
     CategoryProvider,
     FeedProvider,
     FreeCmsApiProvider,
+    FreeCmsRecentProvider,
     SearchProvider,
     SitemapProvider,
     YunnanCmsProvider,
@@ -119,6 +120,7 @@ class DiscoveryRun:
     pages: list[CrawledPage]
     failed: list[dict]
     stats: DiscoveryStats
+    candidates: list[Candidate] = field(default_factory=list)
 
 
 def _safe_origin(start_url: str) -> str:
@@ -287,6 +289,12 @@ async def discover_pages(
                     client, budget, stats, policy, adapter
                 )
             )
+            if adapter.recent_notice_spec() is not None:
+                providers.append(
+                    FreeCmsRecentProvider(
+                        client, budget, stats, policy, adapter
+                    )
+                )
         elif isinstance(adapter, YunnanCmsAdapter):
             providers.append(
                 YunnanCmsProvider(client, budget, stats, policy, adapter)
@@ -455,4 +463,9 @@ async def discover_pages(
         stats.elapsed_ms = max(
             0, int((time.monotonic() - budget.started_at) * 1000)
         )
-        return DiscoveryRun(pages=pages, failed=[], stats=stats)
+        return DiscoveryRun(
+            pages=pages,
+            failed=[],
+            stats=stats,
+            candidates=ranked,
+        )
