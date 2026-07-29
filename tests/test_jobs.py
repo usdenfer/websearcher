@@ -169,6 +169,7 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(
 
     async def fake_crawl(url, **kwargs):
         calls["crawl_budget"] = kwargs["budget"]
+        calls["crawl_kwargs"] = kwargs
         return base
 
     async def fake_expand(keywords, host):
@@ -208,13 +209,62 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(
         "https://x.test/", ["alpha"], 1, "off",
     )
     assert calls["kwargs"]["budget"] is calls["crawl_budget"]
-    assert calls["kwargs"]["budget"].timeout_seconds == 120
+    assert calls["crawl_budget"].initial_pages == 60
+    assert calls["crawl_budget"].max_pages == 120
+    assert calls["crawl_budget"].timeout_seconds == 120
+    assert (
+        calls["crawl_kwargs"]["max_pages"]
+        == jobs.BASE_BFS_PAGE_BUDGET
+    )
     assert timeout_calls == []
     assert result["pagesCrawled"] == 2
     assert result["totalHits"] == 2
     assert base.failed == [
         {"url": "https://x.test/bad", "reason": "HTTP 500"},
     ]
+
+
+def test_run_job_uses_shared_special_zycg_budget(tmp_path):
+    store = jobs.JobStore(tmp_path / "jobs.json")
+    store.add(_job(
+        {"kind": "daily", "time": "09:30"},
+        startUrl="https://www.zycg.gov.cn./",
+        render="off",
+    ))
+    calls = {}
+
+    async def fake_crawl(url, **kwargs):
+        calls["crawl"] = kwargs
+        return CrawlResult(pages=[
+            CrawledPage(url, "<html><main>alpha</main></html>")
+        ])
+
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_discovery(*args, **kwargs):
+        calls["discovery"] = kwargs
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="freecms"),
+        )
+
+    result = asyncio.run(jobs.run_job(
+        store,
+        "j1",
+        crawl_fn=fake_crawl,
+        expand_fn=fake_expand,
+        discovery_fn=fake_discovery,
+    ))
+
+    assert "error" not in result
+    crawl_budget = calls["crawl"]["budget"]
+    assert calls["discovery"]["budget"] is crawl_budget
+    assert crawl_budget.initial_pages == 150
+    assert crawl_budget.max_pages == 300
+    assert crawl_budget.timeout_seconds == 300
+    assert calls["crawl"]["max_pages"] == jobs.BASE_BFS_PAGE_BUDGET
 
 
 def test_run_job_failure_records_error(tmp_path):

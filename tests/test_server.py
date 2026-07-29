@@ -5,6 +5,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import search_budget
 import server
 from crawler import CrawledPage, CrawlResult
 from discovery.engine import DiscoveryRun
@@ -26,6 +27,8 @@ def search(site_server, keywords, path="/index.html"):
     [
         "https://zycg.gov.cn/",
         "https://www.zycg.gov.cn/search",
+        "https://www.zycg.gov.cn./",
+        "https://www.zycg.gov.cn.:8443/search",
     ],
 )
 def test_search_budget_expands_for_zycg_hosts(start_url):
@@ -40,10 +43,10 @@ def test_search_budget_expands_for_zycg_hosts(start_url):
 
 
 def test_normalize_dns_hostname_handles_ascii_and_idna():
-    assert server._normalize_dns_hostname(
+    assert search_budget._normalize_dns_hostname(
         "WWW.ZYCG.GOV.CN"
     ) == "www.zycg.gov.cn"
-    assert server._normalize_dns_hostname(
+    assert search_budget._normalize_dns_hostname(
         "例子.中国"
     ) == "xn--fsqu00a.xn--fiqs8s"
 
@@ -59,6 +62,7 @@ def test_normalize_dns_hostname_handles_ascii_and_idna():
         "https://-bad.zycg.gov.cn/",
         "https://bad-.zycg.gov.cn/",
         "https://.zycg.gov.cn/",
+        "https://www.zycg.gov.cn../",
         f"https://{'a' * 64}.zycg.gov.cn/",
         (
             "https://"
@@ -82,7 +86,7 @@ def test_search_budget_uses_generic_limits_for_other_or_invalid_hosts(
 
     assert budget.initial_pages == 60
     assert budget.max_pages == 120
-    assert budget.timeout_seconds == server.SEARCH_BUDGET_SECONDS
+    assert budget.timeout_seconds == search_budget.SEARCH_BUDGET_SECONDS
     assert budget.started_at == started_at
 
 
@@ -93,9 +97,12 @@ def test_search_budget_keeps_archive_limits_for_zycg():
         "https://zycg.gov.cn/", True, started_at
     )
 
-    assert budget.initial_pages == server.ARCHIVE_MAX_PAGES
-    assert budget.max_pages == server.ARCHIVE_MAX_PAGES
-    assert budget.timeout_seconds == server.ARCHIVE_BUDGET_SECONDS
+    assert budget.initial_pages == search_budget.ARCHIVE_MAX_PAGES
+    assert budget.max_pages == search_budget.ARCHIVE_MAX_PAGES
+    assert (
+        budget.timeout_seconds
+        == search_budget.ARCHIVE_BUDGET_SECONDS
+    )
     assert budget.started_at == started_at
 
 
@@ -565,7 +572,9 @@ def test_keyword_expansion_obeys_end_to_end_deadline(monkeypatch):
             stats=DiscoveryStats(),
         )
 
-    monkeypatch.setattr(server, "SEARCH_BUDGET_SECONDS", 0.02)
+    monkeypatch.setattr(
+        search_budget, "SEARCH_BUDGET_SECONDS", 0.02
+    )
     monkeypatch.setattr(server, "expand_keywords", slow_expand)
     monkeypatch.setattr(server, "crawl", fake_crawl)
     monkeypatch.setattr(server, "discover_pages", fake_discover)

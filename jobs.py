@@ -18,11 +18,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from crawler import ARCHIVE_BUDGET_SECONDS, ARCHIVE_MAX_PAGES
+from search_budget import (
+    BASE_BFS_PAGE_BUDGET,
+    make_search_budget,
+)
 
 JOBS_FILE = Path(__file__).parent / "data" / "jobs.json"
-SEARCH_BUDGET_SECONDS = 120
-BASE_BFS_PAGE_BUDGET = 30
 AUTO_LOW_HITS = 3
 MAX_HIT_KEYS = 500
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -203,18 +204,13 @@ async def run_job(store: JobStore, job_id: str,
     job["running"] = True
     store.update(job)
     try:
-        from discovery import BudgetManager
-
         mode = job.get("render", "auto")
         archive_mode = mode == "archive"
         search_started = time.monotonic()
-        budget = BudgetManager(
-            initial_pages=ARCHIVE_MAX_PAGES if archive_mode else 60,
-            max_pages=ARCHIVE_MAX_PAGES if archive_mode else 120,
-            timeout_seconds=(
-                ARCHIVE_BUDGET_SECONDS if archive_mode
-                else SEARCH_BUDGET_SECONDS),
-            started_at=search_started,
+        budget = make_search_budget(
+            job["startUrl"],
+            archive_mode,
+            search_started,
         )
         deadline = budget.deadline
         host = urlsplit(job["startUrl"]).netloc
