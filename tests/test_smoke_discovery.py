@@ -67,7 +67,13 @@ def test_summary_only_contains_public_diagnostic_fields():
     response = {
         "pagesCrawled": 12,
         "totalHits": 2,
-        "discovery": {"partial": True, "providers": {"sitemap": 1}},
+        "weakHits": 3,
+        "discovery": {
+            "partial": True,
+            "providers": {"sitemap": 1},
+            "recentWindowDays": 30,
+            "stopReason": "enough_recent_results",
+        },
         "results": [
             {"pageUrl": "https://example.com/a", "hits": [{"keyword": "正文关键词"}]},
             {"pageUrl": "https://example.com/b", "hits": [{"keyword": "正文关键词"}]},
@@ -81,9 +87,46 @@ def test_summary_only_contains_public_diagnostic_fields():
     assert output == {
         "pagesCrawled": 12,
         "totalHits": 2,
-        "discovery": {"partial": True, "providers": {"sitemap": 1}},
+        "strongHits": 2,
+        "weakHits": 3,
+        "recentWindowDays": 30,
+        "stopReason": "enough_recent_results",
+        "discovery": {
+            "partial": True,
+            "providers": {"sitemap": 1},
+            "recentWindowDays": 30,
+            "stopReason": "enough_recent_results",
+        },
         "resultUrls": ["https://example.com/a", "https://example.com/b"],
     }
+    assert "requestHeaders" not in output
+    assert "cookies" not in output
+
+
+def test_summary_defaults_legacy_diagnostics_and_missing_results():
+    output = json.loads(
+        summarize_response(
+            {
+                "pagesCrawled": 1,
+                "totalHits": 0,
+                "discovery": "legacy-unstructured-diagnostics",
+                "requestHeaders": {"Authorization": "secret"},
+                "cookies": {"JSESSIONID": "secret"},
+            }
+        )
+    )
+
+    assert output == {
+        "pagesCrawled": 1,
+        "totalHits": 0,
+        "strongHits": 0,
+        "weakHits": 0,
+        "recentWindowDays": None,
+        "stopReason": None,
+        "discovery": {},
+        "resultUrls": [],
+    }
+    assert "secret" not in json.dumps(output)
 
 
 def test_async_main_posts_to_normalized_api_and_prints_safe_summary(
@@ -119,7 +162,7 @@ def test_async_main_posts_to_normalized_api_and_prints_safe_summary(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert calls == {
-        "timeout": 130,
+        "timeout": 330,
         "url": "http://127.0.0.1:7100/api/search",
         "payload": {
             "startUrl": "https://example.com/",
@@ -131,6 +174,10 @@ def test_async_main_posts_to_normalized_api_and_prints_safe_summary(
     assert json.loads(captured.out) == {
         "pagesCrawled": 12,
         "totalHits": 1,
+        "strongHits": 1,
+        "weakHits": 0,
+        "recentWindowDays": None,
+        "stopReason": None,
         "discovery": {"partial": False},
         "resultUrls": ["https://example.com/article"],
     }
@@ -185,7 +232,7 @@ def test_async_main_safely_handles_malformed_json_decoder_error(
     assert "secret" not in captured.err
 
 
-def test_async_main_safely_handles_missing_json_fields(monkeypatch, capsys):
+def test_async_main_defaults_missing_optional_json_fields(monkeypatch, capsys):
     calls = {}
     response = FakeResponse(
         {
@@ -204,7 +251,16 @@ def test_async_main_safely_handles_missing_json_fields(monkeypatch, capsys):
     )
 
     captured = capsys.readouterr()
-    assert exit_code == 1
-    assert captured.out == ""
-    assert captured.err == "冒烟验证失败：KeyError\n"
-    assert "secret" not in captured.err
+    assert exit_code == 0
+    assert json.loads(captured.out) == {
+        "pagesCrawled": 1,
+        "totalHits": 0,
+        "strongHits": 0,
+        "weakHits": 0,
+        "recentWindowDays": None,
+        "stopReason": None,
+        "discovery": {},
+        "resultUrls": [],
+    }
+    assert captured.err == ""
+    assert "secret" not in captured.out

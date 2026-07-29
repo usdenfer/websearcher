@@ -42,11 +42,18 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def summarize_response(data: dict[str, Any]) -> str:
+    discovery = data.get("discovery")
+    if not isinstance(discovery, dict):
+        discovery = {}
     summary = {
         "pagesCrawled": data["pagesCrawled"],
-        "totalHits": data["totalHits"],
-        "discovery": data["discovery"],
-        "resultUrls": [item["pageUrl"] for item in data["results"]],
+        "totalHits": data.get("totalHits", 0),
+        "strongHits": data.get("totalHits", 0),
+        "weakHits": data.get("weakHits", 0),
+        "recentWindowDays": discovery.get("recentWindowDays"),
+        "stopReason": discovery.get("stopReason"),
+        "discovery": discovery,
+        "resultUrls": [item["pageUrl"] for item in data.get("results", [])],
     }
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
@@ -56,7 +63,7 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
     endpoint = f"{args.api.rstrip('/')}/api/search"
 
     try:
-        async with httpx.AsyncClient(timeout=130) as client:
+        async with httpx.AsyncClient(timeout=330) as client:
             response = await client.post(endpoint, json=build_payload(args))
             response.raise_for_status()
             data = response.json()

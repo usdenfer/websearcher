@@ -158,13 +158,16 @@ def test_archive_https_to_http_downgrade_not_blocked(monkeypatch):
     monkeypatch.setattr(renderer, "render_page_result", fake_render)
 
     async def fake_fetch(context, url, retries, delay):
-        return "<html><body>王丹莉 任职通知</body></html>"
+        return "<html><body>ARCHIVE-BODY-MARK-7319 任职通知</body></html>"
     monkeypatch.setattr(crawler, "_fetch_crawl_html", fake_fetch)
 
     result = asyncio.run(crawl_archive(start))
     bodies = {p.url: p.html for p in result.pages}
     assert hub_final in bodies
-    assert bodies[article] == "<html><body>王丹莉 任职通知</body></html>"
+    assert (
+        bodies[article]
+        == "<html><body>ARCHIVE-BODY-MARK-7319 任职通知</body></html>"
+    )
 
 
 def test_search_api_accepts_archive_mode(site_server, monkeypatch):

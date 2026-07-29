@@ -19,7 +19,7 @@ def store(tmp_path, monkeypatch):
 def _create(**over):
     payload = {
         "startUrl": "https://dct.yn.gov.cn/",
-        "keywords": ["王润梅"], "depth": 1, "render": "auto",
+        "keywords": ["JOB-MARK-4821"], "depth": 1, "render": "auto",
         "schedule": {"kind": "daily", "time": "09:30"},
         "name": "人事任免监控",
     }
