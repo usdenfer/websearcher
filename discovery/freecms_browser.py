@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from discovery.models import DomainPolicy, SearchSpec
 from discovery.urltools import url_allowed
@@ -20,6 +20,25 @@ _FETCH_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded",
 }
+_SAFE_LOCAL_SCHEMES = {"about", "blob", "data"}
+
+
+def _request_allowed(url: str, policy: DomainPolicy) -> bool:
+    try:
+        parts = urlsplit(url)
+    except (TypeError, ValueError):
+        return False
+    scheme = parts.scheme.lower()
+    if scheme in _SAFE_LOCAL_SCHEMES:
+        return True
+    if scheme not in {"http", "https"}:
+        return False
+    origin_url = parts._replace(
+        path="/",
+        query="",
+        fragment="",
+    ).geturl()
+    return url_allowed(origin_url, policy)
 
 
 class _FreeCmsBrowserLoader:
@@ -65,6 +84,13 @@ async def freecms_browser_loader(
     category_url = urljoin(root_url, _CATEGORY_PATH)
     try:
         async with renderer.browser_page_session() as page:
+            async def guard_request(route, request):
+                if _request_allowed(request.url, policy):
+                    await route.continue_()
+                else:
+                    await route.abort("blockedbyclient")
+
+            await page.route("**/*", guard_request)
             for url in (root_url, category_url):
                 response = await page.goto(
                     url,

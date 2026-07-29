@@ -14,6 +14,23 @@ class FakeResponse:
         self.status = status
 
 
+class FakeRequest:
+    def __init__(self, url: str):
+        self.url = url
+
+
+class FakeRoute:
+    def __init__(self):
+        self.aborted = False
+        self.continued = False
+
+    async def abort(self, _reason: str):
+        self.aborted = True
+
+    async def continue_(self):
+        self.continued = True
+
+
 class FakePage:
     def __init__(
         self,
@@ -21,16 +38,47 @@ class FakePage:
         fail_on_evaluate: bool = False,
         navigation_final_urls: list[str] | None = None,
         evaluate_final_url: str | None = None,
+        navigation_request_urls: list[str] | None = None,
+        api_request_urls: list[str] | None = None,
+        resource_request_urls: list[str] | None = None,
     ):
         self.fail_on_evaluate = fail_on_evaluate
         self.navigation_final_urls = list(navigation_final_urls or [])
         self.evaluate_final_url = evaluate_final_url
+        self.navigation_request_urls = list(navigation_request_urls or [])
+        self.api_request_urls = list(api_request_urls or [])
+        self.resource_request_urls = list(resource_request_urls or [])
         self.gotos: list[str] = []
         self.evaluations: list[tuple[str, dict]] = []
+        self.route_handler = None
+        self.continued_requests: list[str] = []
+        self.aborted_requests: list[str] = []
         self.closed = False
+
+    async def route(self, _pattern: str, handler):
+        self.route_handler = handler
+
+    async def _dispatch(self, url: str) -> bool:
+        if self.route_handler is None:
+            self.continued_requests.append(url)
+            return True
+        route = FakeRoute()
+        await self.route_handler(route, FakeRequest(url))
+        if route.continued:
+            self.continued_requests.append(url)
+        if route.aborted:
+            self.aborted_requests.append(url)
+        return route.continued
 
     async def goto(self, url: str, **_kwargs):
         self.gotos.append(url)
+        if not await self._dispatch(url):
+            raise RuntimeError("blocked navigation detail")
+        for redirect_url in self.navigation_request_urls:
+            if not await self._dispatch(redirect_url):
+                raise RuntimeError("blocked redirect detail")
+        for resource_url in self.resource_request_urls:
+            await self._dispatch(resource_url)
         final_url = (
             self.navigation_final_urls.pop(0)
             if self.navigation_final_urls
@@ -42,6 +90,11 @@ class FakePage:
         self.evaluations.append((script, arg))
         if self.fail_on_evaluate:
             raise RuntimeError("secret browser exception")
+        if not await self._dispatch(arg["url"]):
+            raise RuntimeError("blocked API detail")
+        for redirect_url in self.api_request_urls:
+            if not await self._dispatch(redirect_url):
+                raise RuntimeError("blocked API redirect detail")
         return {
             "text": json.dumps({"code": 200, "data": []}),
             "url": self.evaluate_final_url or arg["url"],
@@ -127,6 +180,133 @@ def test_freecms_browser_loader_sanitizes_page_errors_and_closes(
             assert await loader.load(spec, 1) is None
 
         assert page.closed is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "forbidden_url",
+    [
+        "https://outside.test/redirected",
+        "http://127.0.0.1/private",
+    ],
+)
+def test_freecms_browser_route_aborts_navigation_before_request(
+    monkeypatch,
+    forbidden_url,
+):
+    async def run():
+        from discovery.freecms_browser import freecms_browser_loader
+
+        page = FakePage(navigation_request_urls=[forbidden_url])
+
+        @asynccontextmanager
+        async def page_session():
+            try:
+                yield page
+            finally:
+                await page.close()
+
+        monkeypatch.setattr(renderer, "browser_page_session", page_session)
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+
+        with pytest.raises(renderer.RenderError):
+            async with freecms_browser_loader(
+                adapter.origin,
+                policy=adapter.domain_policy(adapter.origin),
+            ):
+                pass
+
+        assert forbidden_url in page.aborted_requests
+        assert forbidden_url not in page.continued_requests
+        assert page.closed is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "forbidden_url",
+    [
+        "https://outside.test/api-redirect",
+        "http://127.0.0.1/private-api",
+    ],
+)
+def test_freecms_browser_route_aborts_api_redirect_before_request(
+    monkeypatch,
+    forbidden_url,
+):
+    async def run():
+        from discovery.freecms_browser import freecms_browser_loader
+
+        page = FakePage(api_request_urls=[forbidden_url])
+
+        @asynccontextmanager
+        async def page_session():
+            try:
+                yield page
+            finally:
+                await page.close()
+
+        monkeypatch.setattr(renderer, "browser_page_session", page_session)
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        spec = adapter.recent_notice_spec()
+        assert spec is not None
+
+        async with freecms_browser_loader(
+            adapter.origin,
+            policy=adapter.domain_policy(adapter.origin),
+        ) as loader:
+            assert await loader.load(spec, 1) is None
+
+        assert forbidden_url in page.aborted_requests
+        assert forbidden_url not in page.continued_requests
+        assert page.closed is True
+
+    asyncio.run(run())
+
+
+def test_freecms_browser_route_allows_safe_page_resources(monkeypatch):
+    async def run():
+        from discovery.freecms_browser import freecms_browser_loader
+
+        allowed_resources = [
+            "https://www.zycg.gov.cn/static/site.css",
+            "data:image/png;base64,AA==",
+            "blob:https://www.zycg.gov.cn/id",
+            "about:blank",
+        ]
+        forbidden_resources = [
+            "https://outside.test/tracker.js",
+            "http://127.0.0.1/private.css",
+        ]
+        page = FakePage(
+            resource_request_urls=[
+                *allowed_resources,
+                *forbidden_resources,
+            ]
+        )
+
+        @asynccontextmanager
+        async def page_session():
+            try:
+                yield page
+            finally:
+                await page.close()
+
+        monkeypatch.setattr(renderer, "browser_page_session", page_session)
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+
+        async with freecms_browser_loader(
+            adapter.origin,
+            policy=adapter.domain_policy(adapter.origin),
+        ):
+            pass
+
+        assert set(allowed_resources).issubset(page.continued_requests)
+        assert set(forbidden_resources).issubset(page.aborted_requests)
+        assert not set(forbidden_resources).intersection(
+            page.continued_requests
+        )
 
     asyncio.run(run())
 
