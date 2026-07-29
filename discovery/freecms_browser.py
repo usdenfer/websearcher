@@ -4,7 +4,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode, urljoin
 
-from discovery.models import SearchSpec
+from discovery.models import DomainPolicy, SearchSpec
+from discovery.urltools import url_allowed
 
 _CATEGORY_PATH = "freecms/site/zygjjgzfcgzx/cggg/index.html"
 _FETCH_SCRIPT = """async ({url, headers}) => {
@@ -22,8 +23,9 @@ _FETCH_HEADERS = {
 
 
 class _FreeCmsBrowserLoader:
-    def __init__(self, page):
+    def __init__(self, page, policy: DomainPolicy):
         self._page = page
+        self._policy = policy
 
     async def load(
         self,
@@ -45,11 +47,17 @@ class _FreeCmsBrowserLoader:
         final_url = loaded.get("url")
         if not isinstance(body, str) or not isinstance(final_url, str):
             return None
+        if not url_allowed(final_url, self._policy):
+            return None
         return body, final_url
 
 
 @asynccontextmanager
-async def freecms_browser_loader(origin: str):
+async def freecms_browser_loader(
+    origin: str,
+    *,
+    policy: DomainPolicy,
+):
     """Warm FreeCMS in Chromium, then expose same-page recent API loading."""
     import renderer
 
@@ -65,7 +73,14 @@ async def freecms_browser_loader(origin: str):
                 )
                 if response is not None and response.status >= 400:
                     raise renderer.RenderError("FreeCMS 页面加载失败")
-            yield _FreeCmsBrowserLoader(page)
+                final_url = (
+                    response.url
+                    if response is not None
+                    else getattr(page, "url", "")
+                )
+                if not url_allowed(final_url, policy):
+                    raise renderer.RenderError("FreeCMS 页面重定向超出范围")
+            yield _FreeCmsBrowserLoader(page, policy)
     except asyncio.CancelledError:
         raise
     except Exception:

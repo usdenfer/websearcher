@@ -1488,6 +1488,7 @@ def test_freecms_recent_transport_failure_falls_back_to_browser():
     async def run():
         browser_pages: list[int] = []
         factory_origins: list[str] = []
+        factory_policies: list[DomainPolicy] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("/selectInfoMore.do"):
@@ -1523,8 +1524,13 @@ def test_freecms_recent_transport_failure_falls_back_to_browser():
                 )
 
         @asynccontextmanager
-        async def browser_loader_factory(origin: str):
+        async def browser_loader_factory(
+            origin: str,
+            *,
+            policy: DomainPolicy,
+        ):
             factory_origins.append(origin)
+            factory_policies.append(policy)
             yield FakeBrowserLoader()
 
         budget = BudgetManager()
@@ -1548,6 +1554,9 @@ def test_freecms_recent_transport_failure_falls_back_to_browser():
         ]
         assert browser_pages == [1, 2]
         assert factory_origins == ["https://www.zycg.gov.cn"]
+        assert factory_policies == [
+            adapter.domain_policy(adapter.origin)
+        ]
         assert stats.sources_succeeded == {"freecms-recent"}
         assert stats.stop_reason == "date-boundary"
         assert "channel-failure" not in stats.warnings

@@ -33,7 +33,14 @@ class RenderedPage:
 
 
 # Browser 与事件循环绑定：换 loop（如测试里多次 asyncio.run）必须重建
-_state: dict = {"loop": None, "pw": None, "browser": None, "sem": None}
+_state: dict = {
+    "loop": None,
+    "pw": None,
+    "browser": None,
+    "sem": None,
+    "init_lock_loop": None,
+    "init_lock": None,
+}
 
 _NEXT_TEXTS = {
     "下一页", "下页", "next", ">", "»", "›", "下一页>", "下一页»", "下页>",
@@ -100,37 +107,74 @@ async def _shutdown_locked() -> None:
 
 async def shutdown() -> None:
     """关闭浏览器实例（应用退出时调用）。"""
-    await _shutdown_locked()
+    loop = asyncio.get_running_loop()
+    lock = _init_lock_for(loop)
+    async with lock:
+        await _shutdown_locked()
+
+
+def _init_lock_for(loop) -> asyncio.Lock:
+    if (
+        _state.get("init_lock") is None
+        or _state.get("init_lock_loop") is not loop
+    ):
+        _state["init_lock_loop"] = loop
+        _state["init_lock"] = asyncio.Lock()
+    return _state["init_lock"]
+
+
+async def _get_browser_state():
+    loop = asyncio.get_running_loop()
+    lock = _init_lock_for(loop)
+    async with lock:
+        browser = _state.get("browser")
+        semaphore = _state.get("sem")
+        if (
+            browser is not None
+            and semaphore is not None
+            and _state["loop"] is loop
+        ):
+            try:
+                if browser.is_connected():
+                    return browser, semaphore
+            except Exception:
+                pass
+        await _shutdown_locked()
+        from playwright.async_api import async_playwright
+        pw = None
+        try:
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as exc:
+            if pw is not None:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            raise RenderError(
+                f"浏览器启动失败：{exc!r}"
+                "（首次使用需运行 playwright install chromium）"
+            ) from exc
+        semaphore = asyncio.Semaphore(RENDER_CONCURRENCY)
+        _state.update(
+            loop=loop,
+            pw=pw,
+            browser=browser,
+            sem=semaphore,
+        )
+        return browser, semaphore
 
 
 async def _get_browser():
-    loop = asyncio.get_running_loop()
-    browser = _state.get("browser")
-    if browser is not None and _state["loop"] is loop:
-        try:
-            if browser.is_connected():
-                return browser
-        except Exception:
-            pass
-    await _shutdown_locked()
-    from playwright.async_api import async_playwright
-    try:
-        pw = await async_playwright().start()
-        browser = await pw.chromium.launch(headless=True)
-    except Exception as exc:
-        raise RenderError(
-            f"浏览器启动失败：{exc!r}（首次使用需运行 playwright install chromium）"
-        ) from exc
-    _state.update(loop=loop, pw=pw, browser=browser,
-                  sem=asyncio.Semaphore(RENDER_CONCURRENCY))
+    browser, _semaphore = await _get_browser_state()
     return browser
 
 
 @asynccontextmanager
 async def browser_page_session() -> AsyncIterator[object]:
     """Yield one page from the shared Chromium under its concurrency limit."""
-    browser = await _get_browser()
-    async with _state["sem"]:
+    browser, semaphore = await _get_browser_state()
+    async with semaphore:
         try:
             page = await browser.new_page()
         except Exception:

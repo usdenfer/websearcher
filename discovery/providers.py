@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 from collections import deque
@@ -881,10 +882,24 @@ class FreeCmsRecentProvider(Provider):
         success = False
         try:
             remaining = self.budget.remaining_seconds()
+            factory_parameters = inspect.signature(
+                self.browser_loader_factory
+            ).parameters.values()
+            supports_policy = any(
+                parameter.name == "policy"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in factory_parameters
+            )
+            loader_context = (
+                self.browser_loader_factory(
+                    self.adapter.origin,
+                    policy=self.policy,
+                )
+                if supports_policy
+                else self.browser_loader_factory(self.adapter.origin)
+            )
             async with asyncio.timeout(remaining):
-                async with self.browser_loader_factory(
-                    self.adapter.origin
-                ) as loader:
+                async with loader_context as loader:
                     self.stats.rendered_pages += 2
                     result, success = await self._crawl_recent(
                         spec, load_page
