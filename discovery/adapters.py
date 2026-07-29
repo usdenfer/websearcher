@@ -82,6 +82,16 @@ class FreeCmsAdapter(SiteAdapter):
     def __init__(self, start_url: str):
         self.origin = _origin(start_url)
 
+    def domain_policy(self, start_url: str) -> DomainPolicy:
+        policy = super().domain_policy(start_url)
+        # searchAll.do 常返回 mkt.zycg.gov.cn 等同源内容子域公告页
+        return DomainPolicy(
+            policy.root_host,
+            policy.allowed_hosts,
+            policy.excluded_hosts,
+            allow_related_hosts=True,
+        )
+
     def search_specs(self) -> list[SearchSpec]:
         return [
             SearchSpec(

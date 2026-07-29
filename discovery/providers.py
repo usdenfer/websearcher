@@ -489,12 +489,37 @@ class FreeCmsApiProvider(Provider):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
 
+    async def _warm_session(self) -> None:
+        """Visit an HTML page so the site issues a usable JSESSIONID.
+
+        Central procurement FreeCMS rejects searchAll.do with code=-1 unless
+        the client already holds a session cookie obtained from an HTML page.
+        Discovery uses a fresh HTTP client, so this warm-up is required even
+        when the homepage was crawled earlier with a different client.
+        """
+        remaining = self.budget.remaining_seconds()
+        if remaining <= 0:
+            self.stats.partial = True
+            return
+        try:
+            async with asyncio.timeout(remaining):
+                await self.client.get(self.adapter.origin + "/")
+        except TimeoutError:
+            self.stats.partial = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.stats.warnings.append(
+                f"{self.source}: session warm {type(exc).__name__}"
+            )
+
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         result: list[Candidate] = []
         seen: set[str] = set()
         source_was_successful = self.source in self.stats.sources_succeeded
         business_success = False
         spec = self.adapter.search_specs()[0]
+        await self._warm_session()
         for keyword in keywords[:6]:
             loaded = await self.get_text(
                 spec.url,

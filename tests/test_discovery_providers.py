@@ -763,6 +763,8 @@ def test_freecms_business_success_is_independent_of_keyword_order(
         response_codes = iter(responses)
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
             code = next(response_codes)
             payload = (
                 {"code": 200, "data": {"rows": []}}
@@ -795,6 +797,8 @@ def test_freecms_business_failure_is_not_success_and_later_keyword_continues():
         requested_keywords: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
             keyword = request.url.params["title"]
             requested_keywords.append(keyword)
             if keyword == "bad":
@@ -834,6 +838,72 @@ def test_freecms_business_failure_is_not_success_and_later_keyword_continues():
         ]
         assert stats.sources_succeeded == {"site-search-api"}
         assert stats.warnings == ["site-search-api: business rejected"]
+
+    asyncio.run(run())
+
+
+def test_freecms_warms_html_session_before_search_api():
+    """中央政府采购网 searchAll.do 需要先访问 HTML 页拿到有效 JSESSIONID，
+    否则返回 code=-1「公告列表查询失败」。发现用的新 client 不会继承
+    基础爬取的 cookie，因此 API 调用前必须自行预热会话。"""
+
+    async def run():
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            cookie = request.headers.get("cookie", "")
+            if request.url.path.endswith("/searchAll.do"):
+                if "JSESSIONID=warm" not in cookie:
+                    return httpx.Response(
+                        200,
+                        text=json.dumps(
+                            {"code": "-1", "msg": "公告列表查询失败"}
+                        ),
+                    )
+                return httpx.Response(
+                    200,
+                    text=json.dumps(
+                        {
+                            "code": "200",
+                            "data": [
+                                {
+                                    "pageUrl": "/notice/1",
+                                    "id": "1",
+                                    "title": "alpha 公告",
+                                }
+                            ],
+                        }
+                    ),
+                )
+            return httpx.Response(
+                200,
+                text="<html></html>",
+                headers={"set-cookie": "JSESSIONID=warm; Path=/"},
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                DomainPolicy(
+                    "www.zycg.gov.cn",
+                    frozenset({"www.zycg.gov.cn"}),
+                ),
+                adapter,
+            ).discover(["alpha"])
+
+        assert paths[0] != "/freecms/rest/v1/notice/searchAll.do"
+        assert "/freecms/rest/v1/notice/searchAll.do" in paths
+        assert [item.url for item in result] == [
+            "https://www.zycg.gov.cn/notice/1?id=1"
+        ]
+        assert "site-search-api" in stats.sources_succeeded
 
     asyncio.run(run())
 

@@ -285,3 +285,22 @@ def test_yunnan_adapter_selected_by_searchgo_script_marker():
     assert adapter.profile == "yunnan-cms"
     assert adapter.search_specs()[0].url == \
         "https://dct.yn.gov.cn/searchN.aspx"
+
+
+def test_freecms_domain_policy_allows_related_content_hosts():
+    from discovery.urltools import url_allowed
+
+    adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+    policy = adapter.domain_policy("https://www.zycg.gov.cn/")
+
+    assert policy.root_host == "www.zycg.gov.cn"
+    assert policy.allowed_hosts == frozenset({"www.zycg.gov.cn"})
+    assert policy.allow_related_hosts is True
+    assert url_allowed(
+        "http://mkt.zycg.gov.cn/mall-view/information/detail?noticeId=1",
+        policy,
+    )
+    assert url_allowed(
+        "https://www.zycg.gov.cn/freecms/site/zygjjgzfcgzx/ggxx/info/1.html",
+        policy,
+    )
