@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from scripts import smoke_discovery
 from scripts.smoke_discovery import build_parser, build_payload, summarize_response
@@ -129,6 +130,12 @@ def test_summary_defaults_legacy_diagnostics_and_missing_results():
     assert "secret" not in json.dumps(output)
 
 
+@pytest.mark.parametrize("response", [None, [], "secret response body"])
+def test_summary_rejects_non_object_response(response):
+    with pytest.raises(TypeError, match="response JSON must be an object"):
+        summarize_response(response)
+
+
 def test_async_main_posts_to_normalized_api_and_prints_safe_summary(
     monkeypatch, capsys
 ):
@@ -230,6 +237,25 @@ def test_async_main_safely_handles_malformed_json_decoder_error(
     assert captured.out == ""
     assert captured.err == "冒烟验证失败：ValueError\n"
     assert "secret" not in captured.err
+
+
+def test_async_main_safely_rejects_non_object_json(monkeypatch, capsys):
+    calls = {}
+    response = FakeResponse(data=["secret response body"])
+    monkeypatch.setattr(
+        smoke_discovery.httpx, "AsyncClient", fake_client_class(response, calls)
+    )
+
+    exit_code = asyncio.run(
+        smoke_discovery.async_main(["https://example.com/", "正文关键词"])
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == "冒烟验证失败：TypeError\n"
+    assert "secret" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_async_main_defaults_missing_optional_json_fields(monkeypatch, capsys):

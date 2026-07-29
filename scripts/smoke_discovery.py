@@ -42,6 +42,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def summarize_response(data: dict[str, Any]) -> str:
+    if not isinstance(data, dict):
+        raise TypeError("response JSON must be an object")
     discovery = data.get("discovery")
     if not isinstance(discovery, dict):
         discovery = {}
