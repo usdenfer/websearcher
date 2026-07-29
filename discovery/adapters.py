@@ -108,7 +108,7 @@ class FreeCmsAdapter(SiteAdapter):
         if host != "zycg.gov.cn" and not host.endswith(".zycg.gov.cn"):
             return None
         return SearchSpec(
-            "recent-notice-api",
+            "freecms-recent",
             self.origin
             + "/freecms/rest/v1/notice/selectInfoMore.do",
             "title",

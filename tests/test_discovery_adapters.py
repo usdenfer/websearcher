@@ -151,6 +151,7 @@ def test_zycg_freecms_adapter_exposes_recent_notice_contract():
     ).recent_notice_spec()
 
     assert spec is not None
+    assert spec.source == "freecms-recent"
     assert spec.url == (
         "https://www.zycg.gov.cn/freecms/rest/v1/notice/"
         "selectInfoMore.do"
@@ -258,7 +259,9 @@ def test_freecms_recent_response_accepts_codes_and_normalizes_page_url(code):
         '"addtimeStr": "2026-07-28"}, '
         '{"pageUrl": "/notice/canonical", "pageURL": "/notice/upper", '
         '"pageurl": "/notice/lower-ignored", "title": "标题二"}, '
-        '{"pageURL": "/notice/upper-only", "title": "标题三"}'
+        '{"pageURL": "/notice/upper-only", "title": "标题三"}, '
+        '{"pageURL": "/notice/upper-preferred", '
+        '"pageurl": "/notice/lower-ignored", "title": "标题四"}'
         "]}"
     ) % (code if isinstance(code, int) else f'"{code}"')
 
@@ -280,6 +283,10 @@ def test_freecms_recent_response_accepts_codes_and_normalizes_page_url(code):
         {
             "pageUrl": "/notice/upper-only",
             "title": "标题三",
+        },
+        {
+            "pageUrl": "/notice/upper-preferred",
+            "title": "标题四",
         },
     ]
     assert warning == ""
