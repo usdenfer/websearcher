@@ -664,6 +664,12 @@ class FreeCmsApiProvider(Provider):
             self.stats.sources_succeeded.add(self.source)
         else:
             self.stats.sources_succeeded.discard(self.source)
+        if not business_success:
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+            else:
+                self.stats.note_stop("channel-failure")
         return result
 
 
@@ -732,7 +738,6 @@ class FreeCmsRecentProvider(Provider):
             ok, rows, warning = self.adapter.parse_recent_response(body)
             if not ok:
                 self.stats.warnings.append(f"{self.source}: {warning}")
-                self.stats.note_stop("channel-failure")
                 break
 
             business_success = True
@@ -809,6 +814,11 @@ class FreeCmsRecentProvider(Provider):
             self.stats.sources_succeeded.add(self.source)
         else:
             self.stats.sources_succeeded.discard(self.source)
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+            else:
+                self.stats.note_stop("channel-failure")
         return result
 
 

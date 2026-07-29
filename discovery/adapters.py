@@ -141,11 +141,7 @@ class FreeCmsAdapter(SiteAdapter):
         if not isinstance(response, dict):
             return False, [], "FreeCMS 搜索接口业务失败"
         if str(response.get("code")) not in {"0", "200"}:
-            return (
-                False,
-                [],
-                str(response.get("msg") or "FreeCMS 搜索接口业务失败"),
-            )
+            return False, [], "FreeCMS 搜索接口业务失败"
         payload = response.get("data")
         rows = payload.get("rows") if isinstance(payload, dict) else payload
         if (

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -229,16 +230,26 @@ def test_freecms_success_code_rejects_malformed_payloads(body):
     assert "数据结构无效" in warning
 
 
-def test_freecms_business_failure_is_not_empty_success_and_preserves_message():
+def test_freecms_business_failure_is_sanitized():
     adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
 
     ok, rows, warning = adapter.parse_api_response(
-        fixture("freecms_failure.json")
+        json.dumps(
+            {
+                "code": 500,
+                "msg": (
+                    "Authorization: Bearer secret-token "
+                    "Cookie: JSESSIONID=secret"
+                ),
+            }
+        )
     )
 
     assert ok is False
     assert rows == []
-    assert warning == "公告列表查询失败"
+    assert warning == "FreeCMS 搜索接口业务失败"
+    assert "secret" not in warning
+    assert "Authorization" not in warning
 
 
 def test_freecms_invalid_json_is_reported_in_chinese():

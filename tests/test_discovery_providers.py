@@ -841,7 +841,89 @@ def test_freecms_business_failure_is_not_success_and_later_keyword_continues():
             "https://x.test/notice/view?id=42&kind=x"
         ]
         assert stats.sources_succeeded == {"site-search-api"}
-        assert stats.warnings == ["site-search-api: business rejected"]
+        assert stats.warnings == [
+            "site-search-api: FreeCMS 搜索接口业务失败"
+        ]
+        assert stats.stop_reason is None
+
+    asyncio.run(run())
+
+
+def test_freecms_secret_business_failure_is_sanitized_and_stops_channel():
+    async def run():
+        secret = "Bearer secret-token"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            return httpx.Response(
+                200,
+                text=json.dumps(
+                    {
+                        "code": 500,
+                        "msg": (
+                            f"Authorization: {secret}; "
+                            "Cookie: JSESSIONID=secret-cookie"
+                        ),
+                    }
+                ),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+            ).discover(["alpha"])
+
+        assert result == []
+        assert stats.warnings == [
+            "site-search-api: FreeCMS 搜索接口业务失败"
+        ]
+        assert secret not in " ".join(stats.warnings)
+        assert "secret-cookie" not in " ".join(stats.warnings)
+        assert stats.stop_reason == "channel-failure"
+
+    asyncio.run(run())
+
+
+def test_freecms_http_failure_stops_channel_without_leaking_response():
+    async def run():
+        secret = "secret-response-body"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            return httpx.Response(
+                503,
+                text=secret,
+                headers={"authorization": "Bearer secret-header"},
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+            ).discover(["alpha"])
+
+        assert result == []
+        assert stats.warnings == ["site-search-api: HTTPStatusError"]
+        assert secret not in " ".join(stats.warnings)
+        assert "secret-header" not in " ".join(stats.warnings)
+        assert stats.stop_reason == "channel-failure"
 
     asyncio.run(run())
 
@@ -1342,6 +1424,70 @@ def test_freecms_recent_business_failure_is_not_success():
         assert stats.warnings == [
             "freecms-recent: FreeCMS 最近公告接口业务失败"
         ]
+        assert stats.stop_reason == "channel-failure"
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_transport_failure_stops_channel():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/selectInfoMore.do"):
+                raise httpx.ConnectError(
+                    "secret transport detail",
+                    request=request,
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert result == []
+        assert stats.warnings == ["freecms-recent: ConnectError"]
+        assert "secret" not in " ".join(stats.warnings)
+        assert stats.stop_reason == "channel-failure"
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_successful_empty_page_is_not_channel_failure():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/selectInfoMore.do"):
+                return httpx.Response(
+                    200,
+                    text=json.dumps({"code": 200, "data": []}),
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert result == []
+        assert stats.sources_succeeded == {"freecms-recent"}
+        assert stats.stop_reason is None
 
     asyncio.run(run())
 
