@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections import deque
 from urllib.parse import (
@@ -558,6 +559,39 @@ class FreeCmsApiProvider(Provider):
         return result
 
 
+def _parse_search_count(body: str) -> int | None:
+    """解析 searchClassCount.aspx 的响应。
+
+    真实接口返回 JSON：{"code":0, "data":[{"name":"人事任免","Count":2}, ...]}，
+    总数取各栏目 Count 之和；兼容个别站点直接返回纯数字的情况。
+    无法识别时返回 None。
+    """
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        if str(data.get("code")) != "0":
+            return None
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            return None
+        total = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            try:
+                total += int(row.get("Count") or 0)
+            except (TypeError, ValueError):
+                return None
+        return total
+    if len(body) <= 200:
+        match = re.search(r"(?<![-\d])\d+", body)
+        if match:
+            return int(match.group())
+    return None
+
+
 class YunnanCmsProvider(Provider):
     source = "site-search"
 
@@ -588,18 +622,13 @@ class YunnanCmsProvider(Provider):
             if count is None:
                 continue
             count_body, _count_final_url = count
-            stripped_count = count_body.strip()
-            count_match = (
-                re.search(r"(?<![-\d])\d+", stripped_count)
-                if len(stripped_count) <= 200
-                else None
-            )
-            if count_match is None:
+            total = _parse_search_count(count_body.strip())
+            if total is None:
                 self.stats.warnings.append(
                     f"{self.source}: invalid count"
                 )
                 continue
-            if int(count_match.group()) == 0:
+            if total == 0:
                 continue
             for page_no in range(1, 11):
                 loaded = await self.get_text(

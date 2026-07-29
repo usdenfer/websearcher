@@ -155,6 +155,13 @@ def select_adapter(start_url: str, homepage: str) -> SiteAdapter:
         or "searchall.do" in lowered
     ):
         return FreeCmsAdapter(start_url)
-    if "searchn.aspx" in lowered or "searchclasscount.aspx" in lowered:
+    if (
+        "searchn.aspx" in lowered
+        or "searchclasscount.aspx" in lowered
+        # 云南 CMS 模板族的站内搜索入口：HSearchGo/MSearchGo 跳转
+        # Search.html?tags=（搜索结果由 searchN.aspx 提供）
+        or "hsearchgo" in lowered
+        or "msearchgo" in lowered
+    ):
         return YunnanCmsAdapter(start_url)
     return SiteAdapter()

@@ -1009,3 +1009,50 @@ def test_provider_request_is_cancelled_at_shared_deadline():
 
     asyncio.run(run())
     assert cancelled is True
+
+
+def test_yunnan_count_accepts_real_json_response():
+    """真实 searchClassCount.aspx 返回 JSON
+    {"code":0,"data":[{"id":..,"name":..,"Count":N},...]}，
+    而不是纯数字；总数为各栏目 Count 之和。"""
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            keyword = request.url.params.get("tags", "")
+            if request.url.path.endswith("searchClassCount.aspx"):
+                total = 2 if keyword == "alpha" else 0
+                body = json.dumps({
+                    "msg": "操作成功", "code": 0,
+                    "data": [
+                        {"id": "629785882780", "name": "机构概况", "Count": 0},
+                        {"id": "691102109750", "name": "内设机构", "Count": 0},
+                        {"id": "334716501415", "name": "领导班子", "Count": 0},
+                        {"id": "170893906916", "name": "直属单位", "Count": 0},
+                        {"id": "267380865381", "name": "政务要闻", "Count": 0},
+                        {"id": "210620544148", "name": "人事任免", "Count": total},
+                    ],
+                }, ensure_ascii=False)
+                return httpx.Response(200, text=body)
+            if keyword == "alpha" and request.url.params.get("page") == "1":
+                return httpx.Response(
+                    200,
+                    text='<main><a href="/alpha-old.html">alpha 旧文</a>'
+                         '</main>',
+                )
+            return httpx.Response(200, text="<main></main>")
+
+        adapter = YunnanCmsAdapter("https://x.test/start")
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await YunnanCmsProvider(
+                client, BudgetManager(), stats, POLICY, adapter,
+            ).discover(["alpha", "beta"])
+
+        assert [item.url for item in result] == [
+            "https://x.test/alpha-old.html"
+        ]
+        assert "site-search" in stats.sources_succeeded
+        assert not any("invalid count" in w for w in stats.warnings)
+
+    asyncio.run(run())

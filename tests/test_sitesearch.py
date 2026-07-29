@@ -260,7 +260,8 @@ async def _test_collect_pages_no_keyword_hit(search_site):
         f"{search_site}/a2.html",
         f"{search_site}/a3.html",
     }.intersection(page.url for page in pages)
-    assert info["available"] is True
+    # discovery 语义：零结果 = 无来源产出，available 为 False
+    assert info["available"] is False
     assert info["pagesFetched"] == len(pages)
 
 

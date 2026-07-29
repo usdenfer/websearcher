@@ -268,3 +268,20 @@ def test_freecms_detection_has_priority_over_yunnan_markers(
         select_adapter(start_url, homepage),
         FreeCmsAdapter,
     )
+
+
+def test_yunnan_adapter_selected_by_searchgo_script_marker():
+    """真实云南 CMS 首页不直接引用 searchN.aspx，搜索入口是
+    HSearchGo()/MSearchGo()（跳转 Search.html?tags=），也要能识别。"""
+    homepage = (
+        '<input name="Htags" id="HKeyword" '
+        "onkeydown=\"if(event.keyCode==13){HSearchGo();}\">"
+        '<a class="search_btn" onclick="HSearchGo();">搜索</a>'
+        '<input name="Mtags" id="MKeyword" '
+        "onkeydown=\"if(event.keyCode==13){MSearchGo();}\">"
+    )
+    adapter = select_adapter("https://dct.yn.gov.cn/", homepage)
+    assert isinstance(adapter, YunnanCmsAdapter)
+    assert adapter.profile == "yunnan-cms"
+    assert adapter.search_specs()[0].url == \
+        "https://dct.yn.gov.cn/searchN.aspx"
