@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections import deque
+from datetime import date, timedelta
 from urllib.parse import (
     parse_qsl,
     urlencode,
@@ -475,6 +476,31 @@ class CategoryProvider(Provider):
                 result.append(item)
 
 
+async def _warm_freecms_session(
+    client: httpx.AsyncClient,
+    budget: BudgetManager,
+    stats: DiscoveryStats,
+    adapter: FreeCmsAdapter,
+    source: str,
+) -> None:
+    """Visit an HTML page so FreeCMS issues a usable JSESSIONID."""
+    remaining = budget.remaining_seconds()
+    if remaining <= 0:
+        stats.partial = True
+        return
+    try:
+        async with asyncio.timeout(remaining):
+            await client.get(adapter.origin + "/")
+    except TimeoutError:
+        stats.partial = True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        stats.warnings.append(
+            f"{source}: session warm {type(exc).__name__}"
+        )
+
+
 class FreeCmsApiProvider(Provider):
     source = "site-search-api"
 
@@ -490,28 +516,13 @@ class FreeCmsApiProvider(Provider):
         self.adapter = adapter
 
     async def _warm_session(self) -> None:
-        """Visit an HTML page so the site issues a usable JSESSIONID.
-
-        Central procurement FreeCMS rejects searchAll.do with code=-1 unless
-        the client already holds a session cookie obtained from an HTML page.
-        Discovery uses a fresh HTTP client, so this warm-up is required even
-        when the homepage was crawled earlier with a different client.
-        """
-        remaining = self.budget.remaining_seconds()
-        if remaining <= 0:
-            self.stats.partial = True
-            return
-        try:
-            async with asyncio.timeout(remaining):
-                await self.client.get(self.adapter.origin + "/")
-        except TimeoutError:
-            self.stats.partial = True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.stats.warnings.append(
-                f"{self.source}: session warm {type(exc).__name__}"
-            )
+        await _warm_freecms_session(
+            self.client,
+            self.budget,
+            self.stats,
+            self.adapter,
+            self.source,
+        )
 
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         result: list[Candidate] = []
@@ -578,6 +589,151 @@ class FreeCmsApiProvider(Provider):
                     )
                 )
         if source_was_successful or business_success:
+            self.stats.sources_succeeded.add(self.source)
+        else:
+            self.stats.sources_succeeded.discard(self.source)
+        return result
+
+
+class FreeCmsRecentProvider(Provider):
+    source = "freecms-recent"
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        budget: BudgetManager,
+        stats: DiscoveryStats,
+        policy: DomainPolicy,
+        adapter: FreeCmsAdapter,
+        *,
+        today: date | None = None,
+        max_pages: int = 80,
+    ):
+        super().__init__(client, budget, stats, policy)
+        self.adapter = adapter
+        self.today = today
+        self.max_pages = max_pages
+
+    async def discover(self, keywords: list[str]) -> list[Candidate]:
+        spec = self.adapter.recent_notice_spec()
+        if spec is None:
+            return []
+
+        self.stats.recent_window_days = 30
+        await _warm_freecms_session(
+            self.client,
+            self.budget,
+            self.stats,
+            self.adapter,
+            self.source,
+        )
+        if self.budget.expired():
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+            return []
+
+        cutoff = (self.today or date.today()) - timedelta(days=30)
+        result: list[Candidate] = []
+        seen: set[str] = set()
+        business_success = False
+        dates_nonincreasing = True
+        last_valid_date: date | None = None
+
+        for page in range(1, self.max_pages + 1):
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                break
+            loaded = await self.get_text(
+                spec.url,
+                limit=self.max_pages,
+                params=spec.params_for("", page),
+                counts_as_html=False,
+            )
+            if loaded is None:
+                if self.budget.expired():
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                break
+
+            body, _final_url = loaded
+            ok, rows, warning = self.adapter.parse_recent_response(body)
+            if not ok:
+                self.stats.warnings.append(f"{self.source}: {warning}")
+                self.stats.note_stop("channel-failure")
+                break
+
+            business_success = True
+            if not rows:
+                break
+
+            parsed_rows: list[tuple[dict, date | None]] = []
+            page_has_expired_date = False
+            for row in rows:
+                raw_date = row.get("addtimeStr")
+                published: date | None = None
+                if raw_date is not None:
+                    try:
+                        published = date.fromisoformat(
+                            str(raw_date)[:10]
+                        )
+                    except ValueError:
+                        pass
+                parsed_rows.append((row, published))
+                if published is not None:
+                    if (
+                        last_valid_date is not None
+                        and published > last_valid_date
+                    ):
+                        dates_nonincreasing = False
+                    last_valid_date = published
+                    if published < cutoff:
+                        page_has_expired_date = True
+
+            for row, published in parsed_rows:
+                if published is not None and published < cutoff:
+                    continue
+                raw_url = str(row.get("pageUrl") or "")
+                if not raw_url:
+                    continue
+                try:
+                    candidate_url = urljoin(
+                        self.adapter.origin + "/", raw_url
+                    )
+                except (UnicodeError, ValueError):
+                    continue
+                candidate_url = normalize_candidate_url(candidate_url)
+                if (
+                    not candidate_url
+                    or candidate_url in seen
+                    or not url_allowed(candidate_url, self.policy)
+                ):
+                    continue
+                seen.add(candidate_url)
+                if published is None:
+                    self.stats.unknown_date_candidates += 1
+                result.append(
+                    Candidate(
+                        candidate_url,
+                        self.source,
+                        title_hint=str(row.get("title") or ""),
+                        score=75,
+                        published_date=(
+                            published.isoformat()
+                            if published is not None
+                            else None
+                        ),
+                        source_evidence=(self.source,),
+                    )
+                )
+
+            if dates_nonincreasing and page_has_expired_date:
+                self.stats.note_stop("date-boundary")
+                break
+            if page == self.max_pages:
+                self.stats.note_stop("provider-page-limit")
+
+        if business_success:
             self.stats.sources_succeeded.add(self.source)
         else:
             self.stats.sources_succeeded.discard(self.source)

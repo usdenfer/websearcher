@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import date
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from discovery.providers import (
     CategoryProvider,
     FeedProvider,
     FreeCmsApiProvider,
+    FreeCmsRecentProvider,
     Provider,
     SearchProvider,
     SitemapProvider,
@@ -904,6 +906,311 @@ def test_freecms_warms_html_session_before_search_api():
             "https://www.zycg.gov.cn/notice/1?id=1"
         ]
         assert "site-search-api" in stats.sources_succeeded
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_stops_at_inclusive_date_boundary():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/selectInfoMore.do"):
+                page = int(request.url.params["currPage"])
+                requested_pages.append(page)
+                rows = {
+                    1: [
+                        {
+                            "pageUrl": "/notice/today",
+                            "title": "today",
+                            "addtimeStr": "2026-07-29 08:00:00",
+                        },
+                        {
+                            "pageUrl": "/notice/july",
+                            "title": "july",
+                            "addtimeStr": "2026-07-01 08:00:00",
+                        },
+                    ],
+                    2: [
+                        {
+                            "pageUrl": "/notice/cutoff",
+                            "title": "cutoff",
+                            "addtimeStr": "2026-06-29 08:00:00",
+                        },
+                        {
+                            "pageUrl": "/notice/old",
+                            "title": "old",
+                            "addtimeStr": "2026-06-28 08:00:00",
+                        },
+                    ],
+                }[page]
+                return httpx.Response(
+                    200, text=json.dumps({"code": 200, "data": rows})
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://www.zycg.gov.cn/notice/today",
+            "https://www.zycg.gov.cn/notice/july",
+            "https://www.zycg.gov.cn/notice/cutoff",
+        ]
+        assert [item.published_date for item in result] == [
+            "2026-07-29",
+            "2026-07-01",
+            "2026-06-29",
+        ]
+        assert all(
+            item.source_evidence == ("freecms-recent",)
+            and item.score == 75
+            for item in result
+        )
+        assert requested_pages == [1, 2]
+        assert stats.recent_window_days == 30
+        assert stats.stop_reason == "date-boundary"
+        assert stats.sources_succeeded == {"freecms-recent"}
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_out_of_order_page_disables_boundary_stop():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/selectInfoMore.do"):
+                return httpx.Response(200, text="<html></html>")
+            page = int(request.url.params["currPage"])
+            requested_pages.append(page)
+            rows = {
+                1: [
+                    {
+                        "pageUrl": "/notice/old",
+                        "addtimeStr": "2026-06-28",
+                    },
+                    {
+                        "pageUrl": "/notice/new",
+                        "addtimeStr": "2026-07-10",
+                    },
+                ],
+                2: [
+                    {
+                        "pageUrl": "/notice/next",
+                        "addtimeStr": "2026-07-09",
+                    }
+                ],
+                3: [],
+            }[page]
+            return httpx.Response(
+                200, text=json.dumps({"code": 200, "data": rows})
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://www.zycg.gov.cn/notice/new",
+            "https://www.zycg.gov.cn/notice/next",
+        ]
+        assert requested_pages == [1, 2, 3]
+        assert stats.stop_reason is None
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_business_failure_is_not_success():
+    async def run():
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text=(
+                    "<html></html>"
+                    if not request.url.path.endswith("/selectInfoMore.do")
+                    else json.dumps(
+                        {"code": -1, "msg": "secret backend detail"}
+                    )
+                ),
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert result == []
+        assert stats.sources_succeeded == set()
+        assert stats.warnings == [
+            "freecms-recent: FreeCMS 最近公告接口业务失败"
+        ]
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_keeps_unknown_dates_and_uses_fixed_params():
+    async def run():
+        api_requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/selectInfoMore.do"):
+                return httpx.Response(200, text="<html></html>")
+            api_requests.append(request)
+            rows = (
+                [
+                    {
+                        "pageURL": "/notice/unknown?b=2&a=1",
+                        "title": "unknown",
+                        "addtimeStr": "not-a-date",
+                    },
+                    {
+                        "pageUrl": "/notice/missing",
+                        "title": "missing",
+                    },
+                ]
+                if request.url.params["currPage"] == "1"
+                else []
+            )
+            return httpx.Response(
+                200, text=json.dumps({"code": "200", "data": rows})
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://www.zycg.gov.cn/notice/unknown?a=1&b=2",
+            "https://www.zycg.gov.cn/notice/missing",
+        ]
+        assert [item.published_date for item in result] == [None, None]
+        assert stats.unknown_date_candidates == 2
+        assert [request.url.params["currPage"] for request in api_requests] == [
+            "1",
+            "2",
+        ]
+        params = api_requests[0].url.params
+        assert params["title"] == ""
+        assert params["siteId"] == "6f5243ee-d4d9-4b69-abbd-1e40576ccd7d"
+        assert params["channel"] == "d0e7c5f4-b93e-4478-b7fe-61110bb47fd5"
+        assert params["pageSize"] == "15"
+        assert params["implementWay"] == "1"
+        assert params["noticeType"] == "1,2,3,31,32,52,57,61"
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_nonempty_last_page_notes_provider_limit():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/selectInfoMore.do"):
+                return httpx.Response(200, text="<html></html>")
+            requested_pages.append(int(request.url.params["currPage"]))
+            return httpx.Response(
+                200,
+                text=json.dumps(
+                    {
+                        "code": 200,
+                        "data": [
+                            {
+                                "pageUrl": f"/notice/{request.url.params['currPage']}",
+                                "addtimeStr": "2026-07-20",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+                max_pages=2,
+            ).discover([])
+
+        assert len(result) == 2
+        assert requested_pages == [1, 2]
+        assert stats.stop_reason == "provider-page-limit"
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_unsupported_site_does_not_mark_source_tried():
+    async def run():
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200)
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover([])
+
+        assert result == []
+        assert calls == 0
+        assert stats.sources_tried == set()
+        assert stats.sources_succeeded == set()
 
     asyncio.run(run())
 
