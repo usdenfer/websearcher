@@ -162,6 +162,15 @@ def test_discovery_stats_note_stop_keeps_highest_priority_reason():
     assert unknown.stop_reason is None
 
 
+def test_discovery_stats_unknown_stop_does_not_replace_known_reason():
+    stats = DiscoveryStats()
+
+    stats.note_stop("channel-failure")
+    stats.note_stop("unknown-reason")
+
+    assert stats.stop_reason == "channel-failure"
+
+
 def test_search_spec_params_merge_fixed_keyword_and_first_page():
     spec = SearchSpec(
         source="internal_search",
