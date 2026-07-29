@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 from crawler import CrawledPage, CrawlResult
@@ -393,6 +393,7 @@ async def discover_pages(
         first_batch = pending[:first_capacity]
         first_success_urls: set[str] = set()
         page_urls = set(visited)
+        resolved_candidate_urls: dict[str, str] = {}
 
         def append_unique(
             fetched_items: list[tuple[str, CrawledPage]],
@@ -401,6 +402,7 @@ async def discover_pages(
             for candidate_url, page in fetched_items:
                 successful_candidates.add(candidate_url)
                 normalized_page_url = normalize_candidate_url(page.url)
+                resolved_candidate_urls[candidate_url] = normalized_page_url
                 if normalized_page_url in page_urls:
                     continue
                 page_urls.add(normalized_page_url)
@@ -463,9 +465,20 @@ async def discover_pages(
         stats.elapsed_ms = max(
             0, int((time.monotonic() - budget.started_at) * 1000)
         )
+        resolved_candidates = rank_candidates(
+            merge_candidates([
+                replace(
+                    item,
+                    url=resolved_candidate_urls.get(item.url, item.url),
+                )
+                for item in ranked
+            ]),
+            per_source=None,
+            per_section=None,
+        )
         return DiscoveryRun(
             pages=pages,
             failed=[],
             stats=stats,
-            candidates=ranked,
+            candidates=resolved_candidates,
         )

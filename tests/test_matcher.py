@@ -415,3 +415,36 @@ def test_match_body_with_recall_sorts_and_hides_ranking_metadata():
     assert all(set(item) == {
         "pageUrl", "pageTitle", "hits", "matchStrength",
     } for item in results)
+
+
+def test_resolved_redirect_candidate_is_strong_only_and_supplies_ranking():
+    pages = [
+        SimpleNamespace(
+            url="https://x.test/base",
+            html="<main>MATCH base</main>",
+        ),
+        SimpleNamespace(
+            url="https://x.test/final",
+            html="<main>MATCH redirected</main>",
+        ),
+    ]
+    candidates = [
+        _candidate(
+            "https://x.test/final",
+            "MATCH redirect title",
+            date="2026-07-20",
+            score=100,
+        ),
+    ]
+
+    results, strong_hits, weak_results = match_body_with_recall(
+        pages, ["MATCH"], candidates,
+    )
+
+    assert strong_hits == 2
+    assert weak_results == 0
+    assert [item["pageUrl"] for item in results] == [
+        "https://x.test/final",
+        "https://x.test/base",
+    ]
+    assert all(item["matchStrength"] == "strong" for item in results)

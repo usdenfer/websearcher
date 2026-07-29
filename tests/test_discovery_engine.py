@@ -487,8 +487,19 @@ def test_discovery_uses_static_final_urls_and_deduplicates_redirects(
     import discovery.engine as engine
 
     candidates = [
-        Candidate("https://x.test/alias-a", "sitemap", score=100),
-        Candidate("https://x.test/alias-b", "sitemap", score=90),
+        Candidate(
+            "https://x.test/alias-a",
+            "sitemap",
+            score=100,
+            source_evidence=("sitemap-index",),
+        ),
+        Candidate(
+            "https://x.test/alias-b",
+            "feed",
+            score=90,
+            published_date="2026-07-20",
+            source_evidence=("rss",),
+        ),
     ]
     context, _providers, _fetchers = _install_engine_fakes(
         monkeypatch, batches={"sitemap": candidates}
@@ -528,6 +539,13 @@ def test_discovery_uses_static_final_urls_and_deduplicates_redirects(
         "https://x.test/final"
     ]
     assert result.stats.candidates_fetched == 1
+    assert len(result.candidates) == 1
+    assert result.candidates[0].url == "https://x.test/final"
+    assert result.candidates[0].score == 100
+    assert result.candidates[0].published_date == "2026-07-20"
+    assert result.candidates[0].source_evidence == (
+        "feed", "rss", "sitemap", "sitemap-index",
+    )
 
 
 def test_discovery_keeps_exact_three_parameter_fetcher_double_compatible(
