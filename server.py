@@ -23,8 +23,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 
-from crawler import (PAGE_TIMEOUT, USER_AGENT, CrawlResult, crawl,
-                     describe_error, fetch_html)
+from crawler import (ARCHIVE_BUDGET_SECONDS, ARCHIVE_MAX_PAGES,
+                     PAGE_TIMEOUT, USER_AGENT, CrawlResult, crawl,
+                     crawl_archive, describe_error, fetch_html)
 from ai import (AIError, ask_prompt, chat_stream, expand_keywords,
                 summarize_prompt)
 from cache import get as cache_get
@@ -59,8 +60,8 @@ class SearchRequest(BaseModel):
     @field_validator("render")
     @classmethod
     def check_render(cls, v: str) -> str:
-        if v not in ("auto", "on", "off"):
-            raise ValueError("render 必须是 auto / on / off")
+        if v not in ("auto", "on", "off", "archive"):
+            raise ValueError("render 必须是 auto / on / off / archive")
         return v
 
     @field_validator("startUrl")
@@ -131,10 +132,13 @@ def _match_crawl(crawl_result, all_keywords: list[str]) -> tuple[list, int]:
 @app.post("/api/search")
 async def search(req: SearchRequest) -> dict:
     search_started = time.monotonic()
+    archive_mode = req.render == "archive"
     budget = BudgetManager(
-        initial_pages=60,
-        max_pages=120,
-        timeout_seconds=SEARCH_BUDGET_SECONDS,
+        initial_pages=ARCHIVE_MAX_PAGES if archive_mode else 60,
+        max_pages=ARCHIVE_MAX_PAGES if archive_mode else 120,
+        timeout_seconds=(
+            ARCHIVE_BUDGET_SECONDS if archive_mode
+            else SEARCH_BUDGET_SECONDS),
         started_at=search_started,
     )
     deadline = budget.deadline
@@ -149,7 +153,17 @@ async def search(req: SearchRequest) -> dict:
 
     render_used = False
     auto_note = None
-    if req.render == "on":
+    if archive_mode:
+        try:
+            crawl_result = await crawl_archive(
+                req.startUrl, deadline=deadline, budget=budget)
+        except ValueError as exc:
+            raise HTTPException(502, f"起始页无法访问：{exc}")
+        if not crawl_result.pages:
+            raise HTTPException(502, "起始页无法访问，无法归档深扫")
+        render_used = True
+        auto_note = "归档深扫：已全量翻页栏目列表并抓取全部文章正文"
+    elif req.render == "on":
         crawl_result = await _crawl_or_502(
             req.startUrl, req.depth, True, deadline, budget)
         render_used = True
@@ -175,34 +189,49 @@ async def search(req: SearchRequest) -> dict:
                     else:
                         auto_note = "已自动尝试渲染补搜，未发现更多结果"
 
-    try:
-        discovery_run = await discover_pages(
-            req.startUrl,
-            all_keywords,
-            crawl_result,
-            req.depth,
-            req.render,
-            budget=budget,
-        )
-    except Exception as exc:
+    if archive_mode:
+        # 归档深扫已做全量发现（渲染全翻页+全部正文），跳过 discovery，
+        # 否则 discovery 会在剩余的大预算里重复翻页爬行，浪费数分钟
         discovery_run = DiscoveryRun(
             pages=[],
             failed=[],
             stats=DiscoveryStats(
-                profile="generic",
-                partial=True,
+                profile="archive",
                 elapsed_ms=max(
                     0,
-                    int(
-                        (time.monotonic() - search_started)
-                        * 1000
-                    ),
+                    int((time.monotonic() - search_started) * 1000),
                 ),
-                warnings=[
-                    f"discovery: {type(exc).__name__}"
-                ],
             ),
         )
+    else:
+        try:
+            discovery_run = await discover_pages(
+                req.startUrl,
+                all_keywords,
+                crawl_result,
+                req.depth,
+                req.render,
+                budget=budget,
+            )
+        except Exception as exc:
+            discovery_run = DiscoveryRun(
+                pages=[],
+                failed=[],
+                stats=DiscoveryStats(
+                    profile="generic",
+                    partial=True,
+                    elapsed_ms=max(
+                        0,
+                        int(
+                            (time.monotonic() - search_started)
+                            * 1000
+                        ),
+                    ),
+                    warnings=[
+                        f"discovery: {type(exc).__name__}"
+                    ],
+                ),
+            )
     crawl_result.pages.extend(discovery_run.pages)
     crawl_result.failed.extend(discovery_run.failed)
 

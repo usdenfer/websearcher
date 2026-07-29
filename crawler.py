@@ -778,3 +778,147 @@ async def _crawl_render(start_url: str, depth: int,
         if deadline_reached or not current_level:
             break
     return result
+
+
+ARCHIVE_MAX_PAGES = 2000
+ARCHIVE_HUB_LIMIT = 12
+ARCHIVE_BUDGET_SECONDS = 1200
+
+
+async def crawl_archive(start_url: str,
+                        deadline: float | None = None,
+                        budget: Any | None = None) -> CrawlResult:
+    """归档深扫：渲染起始页与栏目列表（含全量翻页收割），把发现的
+    全部文章链接的正文静态抓回。
+
+    常规搜索依赖站内搜索接口（只索引标题）和有限的栏目翻页，标题里
+    不含关键词的旧文、正文独有的词都覆盖不到；归档深扫以时间为代价
+    （可能 10~20 分钟）换取正文全覆盖。起始页渲染失败会抛出，其余
+    失败收集进 CrawlResult.failed。
+    """
+    import renderer
+
+    result = CrawlResult()
+
+    render_kwargs: dict = {
+        "navigation_allowed": lambda target: same_site_boundary(
+            start_url, target),
+    }
+    if budget is not None:
+        render_kwargs["reserve_request"] = budget.reserve_html
+    try:
+        start_loaded, deadline_reached = await await_before_deadline(
+            renderer.render_page_result(start_url, **render_kwargs),
+            deadline,
+        )
+    except renderer.RenderError as exc:
+        raise ValueError(str(exc)) from exc
+    if deadline_reached:
+        result.failed.append({"url": start_url, "reason": "搜索截止时间已到"})
+        return result
+    if not same_site_boundary(start_url, start_loaded.final_url):
+        raise ValueError("重定向到站外地址")
+
+    start_page = CrawledPage(url=start_loaded.final_url,
+                             html=start_loaded.html)
+    result.pages.append(start_page)
+    visited = {normalize_url(start_url), normalize_url(start_page.url)}
+
+    def usable(link: str, base_url: str) -> str | None:
+        absolute = urljoin(base_url, link)
+        parts = urlsplit(absolute)
+        if parts.scheme not in ("http", "https"):
+            return None
+        if not same_site_boundary(start_page.url, absolute):
+            return None
+        normalized = normalize_url(absolute)
+        if normalized in visited or is_binary_url(normalized):
+            return None
+        return normalized
+
+    # 栏目列表（hub）：渲染时各自完成全量翻页收割
+    hubs: list[str] = []
+    for link in prioritize_render_links(start_loaded.links):
+        if len(hubs) >= ARCHIVE_HUB_LIMIT:
+            break
+        normalized = usable(link, start_page.url)
+        if normalized is None or not is_render_discovery_hub(normalized):
+            continue
+        visited.add(normalized)
+        hubs.append(normalized)
+
+    async def render_hub(url: str):
+        try:
+            kwargs = {
+                "navigation_allowed": lambda target: same_site_boundary(
+                    start_page.url, target),
+            }
+            if budget is not None:
+                kwargs["reserve_request"] = budget.reserve_html
+            return await renderer.render_page_result(url, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - collected, not raised
+            result.failed.append({"url": url, "reason": describe_error(exc)})
+            return None
+
+    rendered_hubs, hubs_deadline_reached = await gather_before_deadline(
+        (render_hub(u) for u in hubs), deadline)
+    hub_pages = [r for r in rendered_hubs
+                 if r is not None
+                 and same_site_boundary(start_page.url, r.final_url)]
+    result.pages.extend(
+        CrawledPage(url=r.final_url, html=r.html) for r in hub_pages)
+    if hubs_deadline_reached:
+        return result
+
+    # 收集全部文章链接（起始页本身可能就是列表页）
+    articles: list[str] = []
+    for link in start_loaded.links:
+        normalized = usable(link, start_page.url)
+        if normalized and is_render_article_link(normalized):
+            visited.add(normalized)
+            articles.append(normalized)
+    for hub in hub_pages:
+        for link in hub.links:
+            normalized = usable(link, hub.final_url)
+            if normalized and is_render_article_link(normalized):
+                visited.add(normalized)
+                articles.append(normalized)
+    articles = articles[:ARCHIVE_MAX_PAGES]
+
+    # 静态抓取全部文章正文
+    semaphore = asyncio.Semaphore(CONCURRENCY)
+    async with httpx.AsyncClient(
+        timeout=PAGE_TIMEOUT,
+        follow_redirects=True,
+        headers={"User-Agent": USER_AGENT},
+    ) as client:
+        static_context = _CrawlHttpContext(
+            client,
+            lambda target: same_site_boundary(start_page.url, target),
+            None if budget is None else budget.reserve_html,
+        )
+
+        async def fetch_one(url: str) -> CrawledPage | None:
+            async with semaphore:
+                try:
+                    value = await _fetch_crawl_html(
+                        static_context, url, 2, 1.0)
+                except UnsafeRedirect:
+                    result.failed.append(
+                        {"url": url, "reason": "重定向到站外地址"})
+                    return None
+                except PageBudgetExhausted:
+                    result.failed.append(
+                        {"url": url, "reason": "页面预算已用尽"})
+                    return None
+                except Exception as exc:  # noqa: BLE001 - collected
+                    result.failed.append(
+                        {"url": url, "reason": describe_error(exc)})
+                    return None
+                fetched = _as_fetched_html(value, url)
+                return CrawledPage(url=fetched.final_url, html=fetched.html)
+
+        fetched, _ = await gather_before_deadline(
+            (fetch_one(u) for u in articles), deadline)
+        result.pages.extend(p for p in fetched if p is not None)
+    return result

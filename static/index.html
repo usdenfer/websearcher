@@ -125,6 +125,7 @@
       <option value="auto">自动模式</option>
       <option value="on">强制 JS 渲染</option>
       <option value="off">仅静态（最快）</option>
+      <option value="archive">归档深扫（正文全覆盖）</option>
     </select>
     <button id="go">搜索</button>
   </div>
@@ -160,6 +161,7 @@
       <option value="auto">自动模式</option>
       <option value="on">强制 JS 渲染</option>
       <option value="off">仅静态</option>
+      <option value="archive">归档深扫</option>
     </select>
     <select id="jobKind">
       <option value="daily">每天定时</option>
@@ -286,7 +288,8 @@ async function run() {
   document.getElementById("sumErr").textContent = "";
   document.getElementById("qaList").innerHTML = "";
   btn.disabled = true;
-  const hint = renderMode === "on" ? "，浏览器渲染抓取较慢，最长约 120 秒，达到预算会返回部分结果"
+  const hint = renderMode === "archive" ? "，归档深扫会翻完栏目全部列表页并抓取全部文章正文，可能需要 10–20 分钟"
+    : renderMode === "on" ? "，浏览器渲染抓取较慢，最长约 120 秒，达到预算会返回部分结果"
     : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜，最长约 120 秒"
     : depth > 1 ? "，深度抓取最长约 120 秒，达到预算会返回部分结果" : "，通常需要 10–40 秒";
   out.innerHTML = `<div class="status"><span class="spinner"></span>正在按深度 ${depth} 层抓取页面并搜索${hint}…</div>`;

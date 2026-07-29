@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from crawler import ARCHIVE_BUDGET_SECONDS, ARCHIVE_MAX_PAGES
+
 JOBS_FILE = Path(__file__).parent / "data" / "jobs.json"
 SEARCH_BUDGET_SECONDS = 120
 BASE_BFS_PAGE_BUDGET = 30
@@ -180,7 +182,8 @@ class JobStore:
 
 
 async def run_job(store: JobStore, job_id: str,
-                  crawl_fn=None, expand_fn=None, discovery_fn=None) -> dict:
+                  crawl_fn=None, expand_fn=None, discovery_fn=None,
+                  archive_fn=None) -> dict:
     """Execute one scheduled search. Returns a compact run summary;
     job record is updated in the store either way."""
     if crawl_fn is None:
@@ -189,6 +192,8 @@ async def run_job(store: JobStore, job_id: str,
         from ai import expand_keywords as expand_fn
     if discovery_fn is None:
         from discovery import discover_pages as discovery_fn
+    if archive_fn is None:
+        from crawler import crawl_archive as archive_fn
 
     job = store.get(job_id)
     if job is None:
@@ -200,11 +205,15 @@ async def run_job(store: JobStore, job_id: str,
     try:
         from discovery import BudgetManager
 
+        mode = job.get("render", "auto")
+        archive_mode = mode == "archive"
         search_started = time.monotonic()
         budget = BudgetManager(
-            initial_pages=60,
-            max_pages=120,
-            timeout_seconds=SEARCH_BUDGET_SECONDS,
+            initial_pages=ARCHIVE_MAX_PAGES if archive_mode else 60,
+            max_pages=ARCHIVE_MAX_PAGES if archive_mode else 120,
+            timeout_seconds=(
+                ARCHIVE_BUDGET_SECONDS if archive_mode
+                else SEARCH_BUDGET_SECONDS),
             started_at=search_started,
         )
         deadline = budget.deadline
@@ -218,9 +227,16 @@ async def run_job(store: JobStore, job_id: str,
             k for k in expanded if k not in job["keywords"]]
 
         render_used = False
-        mode = job.get("render", "auto")
         try:
-            if mode == "on":
+            if mode == "archive":
+                crawl_result = await archive_fn(
+                    job["startUrl"],
+                    deadline=deadline,
+                    budget=budget,
+                )
+                _require_crawl_pages(crawl_result)
+                render_used = True
+            elif mode == "on":
                 crawl_result = await crawl_fn(
                     job["startUrl"],
                     depth=job["depth"],
@@ -272,30 +288,34 @@ async def run_job(store: JobStore, job_id: str,
 
         from discovery.urltools import normalize_candidate_url
         from matcher import match_body_crawl_result
-        try:
-            discovery_run = await discovery_fn(
-                job["startUrl"],
-                all_keywords,
-                crawl_result,
-                job["depth"],
-                mode,
-                budget=budget,
-            )
-            seen = {
-                normalize_candidate_url(page.url)
-                for page in crawl_result.pages
-            }
-            for page in discovery_run.pages:
-                normalized = normalize_candidate_url(page.url)
-                if normalized in seen:
-                    continue
-                seen.add(normalized)
-                crawl_result.pages.append(page)
-            crawl_result.failed.extend(discovery_run.failed)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - 站内搜索失败不影响任务
-            pass
+        if archive_mode:
+            # 归档深扫已全量发现，跳过 discovery 避免重复翻页
+            discovery_run = None
+        else:
+            try:
+                discovery_run = await discovery_fn(
+                    job["startUrl"],
+                    all_keywords,
+                    crawl_result,
+                    job["depth"],
+                    mode,
+                    budget=budget,
+                )
+                seen = {
+                    normalize_candidate_url(page.url)
+                    for page in crawl_result.pages
+                }
+                for page in discovery_run.pages:
+                    normalized = normalize_candidate_url(page.url)
+                    if normalized in seen:
+                        continue
+                    seen.add(normalized)
+                    crawl_result.pages.append(page)
+                crawl_result.failed.extend(discovery_run.failed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - 站内搜索失败不影响任务
+                pass
         results, total_hits = match_body_crawl_result(
             crawl_result.pages, all_keywords)
         keys = hit_keys(results)
