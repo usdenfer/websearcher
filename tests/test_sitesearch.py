@@ -11,6 +11,9 @@ import asyncio
 import pytest
 
 import sitesearch
+from crawler import CrawledPage, CrawlResult
+from discovery.engine import DiscoveryRun
+from discovery.models import DiscoveryStats
 
 
 ARTICLE_HTML = {
@@ -54,8 +57,13 @@ class SearchSiteHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, ARTICLE_HTML[parsed.path].encode("utf-8"),
                        "text/html")
         elif parsed.path == "/index.html":
-            self._send(200, b"<html><body>home, no article links</body>"
-                            b"</html>", "text/html")
+            self._send(
+                200,
+                (b"<html><body>home, no article links"
+                 b"<a href='/searchN.aspx'>site search</a>"
+                 b"</body></html>"),
+                "text/html",
+            )
         else:
             self._send(404, b"not found", "text/html")
 
@@ -105,6 +113,96 @@ def test_parse_page_count(search_site):
     assert sitesearch.parse_page_count("<html>无分页</html>") == 1
 
 
+def test_collect_pages_delegates_to_discovery_and_normalizes_skip(monkeypatch):
+    calls = {}
+    base = CrawlResult(pages=[
+        CrawledPage("https://x.test/", "<html>home</html>"),
+    ])
+
+    async def fake_crawl(url, **kwargs):
+        calls["crawl"] = (url, kwargs)
+        return base
+
+    async def fake_discover(
+        url, keywords, base_result, depth, render_mode, **kwargs,
+    ):
+        calls["discover"] = (
+            url, keywords, base_result, depth, render_mode, kwargs,
+        )
+        return DiscoveryRun(
+            pages=[
+                CrawledPage(
+                    "https://x.test/old/?utm_source=legacy",
+                    "<html>alpha</html>",
+                ),
+                CrawledPage(
+                    "https://x.test/new.html",
+                    "<html>alpha</html>",
+                ),
+            ],
+            failed=[],
+            stats=DiscoveryStats(
+                sources_succeeded={"site-search"},
+                candidates_found=1,
+            ),
+        )
+
+    monkeypatch.setattr(sitesearch, "crawl", fake_crawl)
+    monkeypatch.setattr(sitesearch, "discover_pages", fake_discover)
+
+    pages, info = asyncio.run(sitesearch.collect_pages(
+        "https://x.test/", ["alpha"],
+        skip={"https://x.test/old?utm_campaign=seen"},
+    ))
+
+    crawl_url, crawl_kwargs = calls["crawl"]
+    assert crawl_url == "https://x.test/"
+    assert crawl_kwargs["depth"] == 0
+    assert crawl_kwargs["max_pages"] == 1
+    assert crawl_kwargs["render"] is False
+    discover = calls["discover"]
+    assert discover[:5] == (
+        "https://x.test/", ["alpha"], base, 1, "off",
+    )
+    assert discover[5]["skip_urls"] == {
+        "https://x.test/old?utm_campaign=seen"
+    }
+    assert discover[5]["budget"] is crawl_kwargs["budget"]
+    assert [page.url for page in pages] == [
+        "https://x.test/new.html",
+    ]
+    assert info == {
+        "available": True,
+        "linksFound": 1,
+        "pagesFetched": 1,
+        "deprecated": True,
+    }
+
+
+def test_collect_pages_handles_empty_start_page(monkeypatch):
+    async def fake_crawl(*args, **kwargs):
+        return CrawlResult(
+            failed=[{"url": "https://x.test/", "reason": "empty"}],
+        )
+
+    async def should_not_discover(*args, **kwargs):
+        raise AssertionError("empty base must not enter discovery")
+
+    monkeypatch.setattr(sitesearch, "crawl", fake_crawl)
+    monkeypatch.setattr(
+        sitesearch, "discover_pages", should_not_discover,
+    )
+
+    pages, info = asyncio.run(
+        sitesearch.collect_pages("https://x.test/", ["alpha"])
+    )
+
+    assert pages == []
+    assert info["available"] is False
+    assert info["pagesFetched"] == 0
+    assert info["deprecated"] is True
+
+
 def test_probe_caches_result(search_site, site_server):
     asyncio.run(_test_probe_caches_result(search_site, site_server))
 
@@ -125,14 +223,14 @@ def test_collect_pages_fetches_all_result_articles(search_site):
 async def _test_collect_pages_fetches_all_result_articles(search_site):
     pages, info = await sitesearch.collect_pages(
         f"{search_site}/index.html", ["alpha"])
-    urls = sorted(p.url for p in pages)
-    assert urls == [f"{search_site}/a1.html",
-                    f"{search_site}/a2.html",
-                    f"{search_site}/a3.html"]
-    assert all("alpha" in p.html for p in pages)
+    urls = {p.url for p in pages}
+    assert {f"{search_site}/a1.html",
+            f"{search_site}/a2.html",
+            f"{search_site}/a3.html"} <= urls
     assert info["available"] is True
-    assert info["linksFound"] == 3
-    assert info["pagesFetched"] == 3
+    assert info["linksFound"] >= 3
+    assert info["pagesFetched"] == len(pages)
+    assert info["deprecated"] is True
 
 
 def test_collect_pages_skips_already_crawled(search_site):
@@ -143,8 +241,11 @@ async def _test_collect_pages_skips_already_crawled(search_site):
     pages, info = await sitesearch.collect_pages(
         f"{search_site}/index.html", ["alpha"],
         skip={f"{search_site}/a1.html", f"{search_site}/a2.html"})
-    assert [p.url for p in pages] == [f"{search_site}/a3.html"]
-    assert info["pagesFetched"] == 1
+    urls = {p.url for p in pages}
+    assert f"{search_site}/a1.html" not in urls
+    assert f"{search_site}/a2.html" not in urls
+    assert f"{search_site}/a3.html" in urls
+    assert info["pagesFetched"] == len(pages)
 
 
 def test_collect_pages_no_keyword_hit(search_site):
@@ -154,9 +255,13 @@ def test_collect_pages_no_keyword_hit(search_site):
 async def _test_collect_pages_no_keyword_hit(search_site):
     pages, info = await sitesearch.collect_pages(
         f"{search_site}/index.html", ["omega"])
-    assert pages == []
+    assert not {
+        f"{search_site}/a1.html",
+        f"{search_site}/a2.html",
+        f"{search_site}/a3.html",
+    }.intersection(page.url for page in pages)
     assert info["available"] is True
-    assert info["pagesFetched"] == 0
+    assert info["pagesFetched"] == len(pages)
 
 
 def test_collect_pages_plain_site_unavailable(site_server):
@@ -181,14 +286,16 @@ def test_search_api_supplements_via_site_search(search_site):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["siteSearch"]["available"] is True
-    assert data["siteSearch"]["pagesFetched"] == 3
+    assert data["siteSearch"]["pagesFetched"] >= 3
+    assert data["siteSearch"]["deprecated"] is True
+    assert "discovery" in data
     urls = {r["pageUrl"] for r in data["results"]}
     assert {f"{search_site}/a1.html", f"{search_site}/a2.html",
             f"{search_site}/a3.html"} <= urls
     assert data["totalHits"] >= 3
 
 
-def test_run_job_supplements_via_sitesearch_fn(tmp_path):
+def test_run_job_supplements_via_discovery_fn(tmp_path):
     import jobs
     store = jobs.JobStore(tmp_path / "jobs.json")
     store.add({
@@ -208,12 +315,21 @@ def test_run_job_supplements_via_sitesearch_fn(tmp_path):
     async def fake_expand(kw, host):
         return []
 
-    async def fake_sitesearch(url, keywords, skip=frozenset()):
-        return [CrawledPage(url="https://x.test/old.html",
-                            html="<html>alpha 旧文</html>")], {}
+    async def fake_discovery(
+        url, keywords, base_result, depth, render_mode, **kwargs,
+    ):
+        assert base_result.pages[0].url == "https://x.test/"
+        return DiscoveryRun(
+            pages=[CrawledPage(
+                url="https://x.test/old.html",
+                html="<html><main>alpha 旧文</main></html>",
+            )],
+            failed=[],
+            stats=DiscoveryStats(),
+        )
 
     r = asyncio.run(jobs.run_job(
         store, "j1", crawl_fn=fake_crawl, expand_fn=fake_expand,
-        sitesearch_fn=fake_sitesearch))
+        discovery_fn=fake_discovery))
     assert r["totalHits"] == 1
     assert r["top"][0]["pageUrl"] == "https://x.test/old.html"

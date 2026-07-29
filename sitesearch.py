@@ -18,7 +18,9 @@ import httpx
 from bs4 import BeautifulSoup
 
 from crawler import (CONCURRENCY, PAGE_TIMEOUT, USER_AGENT, CrawledPage,
-                     fetch_html_retry, is_binary_url, normalize_url)
+                     crawl, fetch_html_retry, is_binary_url, normalize_url)
+from discovery import BudgetManager, discover_pages
+from discovery.urltools import normalize_candidate_url
 
 COUNT_PATH = "/searchClassCount.aspx"
 LIST_PATH = "/searchN.aspx"
@@ -114,51 +116,56 @@ async def _result_links(client: httpx.AsyncClient, origin: str,
 async def collect_pages(start_url: str, keywords: list[str],
                         skip: set[str] | frozenset[str] = frozenset()
                         ) -> tuple[list[CrawledPage], dict]:
-    """用站内搜索接口按关键词收集结果文章并抓取全文。
-
-    返回 (额外页面列表, 信息字典)。站点不支持或任何环节失败都返回
-    ([], info)，绝不抛出——这只是一个补充通道。
-    """
-    info = {"available": False, "linksFound": 0, "pagesFetched": 0}
-    parts = urlsplit(start_url)
-    origin = f"{parts.scheme}://{parts.netloc}"
+    """Compatibility wrapper delegating legacy site search to discovery."""
+    info = {
+        "available": False,
+        "linksFound": 0,
+        "pagesFetched": 0,
+        "deprecated": True,
+    }
+    budget = BudgetManager()
     try:
-        async with httpx.AsyncClient(
-            timeout=PAGE_TIMEOUT, follow_redirects=True,
-            headers={"User-Agent": USER_AGENT},
-        ) as client:
-            if not await probe(client, origin):
-                return [], info
-            info["available"] = True
-            seen = {normalize_url(u) for u in skip}
-            candidates: list[str] = []
-            for kw in keywords[:MAX_KEYWORDS]:
-                try:
-                    for u in await _result_links(client, origin, kw):
-                        if u not in seen:
-                            seen.add(u)
-                            candidates.append(u)
-                except Exception:  # noqa: BLE001 - 单个词失败不影响其他词
-                    continue
-            candidates = candidates[:MAX_EXTRA_PAGES]
-            info["linksFound"] = len(candidates)
-            if not candidates:
-                return [], info
-            sem = asyncio.Semaphore(CONCURRENCY)
+        base = await crawl(
+            start_url,
+            depth=0,
+            max_pages=1,
+            render=False,
+            deadline=budget.deadline,
+            budget=budget,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - compatibility channel is optional
+        return [], info
+    if not base.pages:
+        return [], info
 
-            async def fetch_one(url: str) -> CrawledPage | None:
-                async with sem:
-                    try:
-                        html = await fetch_html_retry(
-                            client, url, attempts=2, base_delay=1.0)
-                        return CrawledPage(url=url, html=html)
-                    except Exception:  # noqa: BLE001 - 单页失败忽略
-                        return None
+    try:
+        run = await discover_pages(
+            start_url,
+            keywords,
+            base,
+            1,
+            "off",
+            skip_urls=skip,
+            budget=budget,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - preserve legacy best-effort semantics
+        return [], info
 
-            fetched = await asyncio.gather(
-                *(fetch_one(u) for u in candidates))
-            pages = [p for p in fetched if p is not None]
-            info["pagesFetched"] = len(pages)
-            return pages, info
-    except Exception:  # noqa: BLE001 - 补充通道失败不阻断主流程
-        return [], {"available": False, "linksFound": 0, "pagesFetched": 0}
+    skipped = {
+        normalize_candidate_url(url)
+        for url in skip
+    }
+    pages = [
+        page for page in run.pages
+        if normalize_candidate_url(page.url) not in skipped
+    ]
+    return pages, {
+        "available": bool(run.stats.sources_succeeded),
+        "linksFound": run.stats.candidates_found,
+        "pagesFetched": len(pages),
+        "deprecated": True,
+    }

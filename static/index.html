@@ -231,6 +231,35 @@ function escapeHtml(s) {
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[c]));
 }
+const DISCOVERY_WARNING_CHANNELS = new Set([
+  "discovery", "site-search", "site-search-api", "sitemap", "feed", "category"
+]);
+function formatDiscoveryWarning(value) {
+  if (typeof value !== "string") return "";
+  const match = value.trim().match(
+    /^([a-z][a-z0-9-]{0,31}):\s+(.+)$/i);
+  if (!match) {
+    return "discovery: 处理失败";
+  }
+
+  const candidateChannel = match[1].toLowerCase();
+  const channel = DISCOVERY_WARNING_CHANNELS.has(candidateChannel)
+    ? candidateChannel : "discovery";
+  const reason = match[2].trim();
+  if (/^(?:RequestError|HTTPStatusError|ValueError|RuntimeError|ConnectError|TimeoutException)$/i.test(reason)) {
+    return `${channel}: ${reason}`;
+  }
+  if (/非\s*HTML/i.test(reason)) return `${channel}: 非 HTML 内容`;
+  if (/业务.*失败|business rejected/i.test(reason)) {
+    return `${channel}: 业务失败`;
+  }
+  if (/无效.*JSON|invalid JSON/i.test(reason)) {
+    return `${channel}: 无效 JSON`;
+  }
+  if (/超时|timeout/i.test(reason)) return `${channel}: 请求超时`;
+  if (/预算|budget/i.test(reason)) return `${channel}: 已达到预算`;
+  return `${channel}: 处理失败`;
+}
 function highlight(snippet, keywords) {
   let html = escapeHtml(snippet);
   for (const kw of keywords) {
@@ -257,9 +286,9 @@ async function run() {
   document.getElementById("sumErr").textContent = "";
   document.getElementById("qaList").innerHTML = "";
   btn.disabled = true;
-  const hint = renderMode === "on" ? "，浏览器渲染抓取较慢，可能需要 2–8 分钟"
-    : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜（最长几分钟）"
-    : depth > 1 ? "，深度抓取可能需要 1–2 分钟" : "，通常需要 10–40 秒";
+  const hint = renderMode === "on" ? "，浏览器渲染抓取较慢，最长约 120 秒，达到预算会返回部分结果"
+    : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜，最长约 120 秒"
+    : depth > 1 ? "，深度抓取最长约 120 秒，达到预算会返回部分结果" : "，通常需要 10–40 秒";
   out.innerHTML = `<div class="status"><span class="spinner"></span>正在按深度 ${depth} 层抓取页面并搜索${hint}…</div>`;
   try {
     const resp = await fetch("/api/search", {
@@ -287,9 +316,24 @@ function render(data) {
   } else {
     el.hidden = true;
   }
+  const discovery = data.discovery || {};
+  const sourceValues = Array.isArray(discovery.sourcesSucceeded)
+    ? discovery.sourcesSucceeded : [];
+  const sources = sourceValues
+    .filter(source => typeof source === "string")
+    .join("、");
+  const warningValues = Array.isArray(discovery.warnings)
+    ? discovery.warnings : [];
+  const formattedWarnings = [...new Set(
+    warningValues.map(formatDiscoveryWarning).filter(Boolean)
+  )].slice(0, 5);
   let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（深度 ${data.depth} 层${data.render ? "，JS 渲染" : ""}${
     data.siteSearch && data.siteSearch.pagesFetched > 0
       ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），命中 ${data.totalHits} 处。${
+    sources ? `<br>有效发现来源：${escapeHtml(sources)}` : ""}${
+    discovery.budgetExpanded ? "<br>已启用扩展页面预算。" : ""}${
+    discovery.partial
+      ? "<br><strong>已达到搜索预算，结果可能不完整。</strong>" : ""}${
     data.autoNote ? `<br>${escapeHtml(data.autoNote)}` : ""}</p>`;
   if (data.totalHits === 0) {
     const kw = data.keywords.map(k => `「${escapeHtml(k)}」`).join("、");
@@ -320,6 +364,12 @@ function render(data) {
     html += `<details><summary>${data.pagesFailed.length} 个页面抓取失败（不影响结果）</summary><ul>` +
       data.pagesFailed.map(f =>
         `<li>${escapeHtml(f.url)} — ${escapeHtml(f.reason)}</li>`).join("") +
+      `</ul></details>`;
+  }
+  if (formattedWarnings.length) {
+    html += `<details><summary>发现通道提示</summary><ul>` +
+      formattedWarnings.map(formattedWarning =>
+        `<li>${escapeHtml(formattedWarning)}</li>`).join("") +
       `</ul></details>`;
   }
   out.innerHTML = html;

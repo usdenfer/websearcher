@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 import cache
 import server
 from crawler import CrawledPage, CrawlResult
+from discovery import DiscoveryRun, DiscoveryStats
 from server import app
 
 client = TestClient(app)
@@ -67,7 +68,8 @@ def test_auto_keeps_static_when_hits_found(monkeypatch, site_server):
     assert data["totalHits"] >= 1
 
 
-def test_auto_escalates_on_js_driven_few_hits(monkeypatch, site_server):
+def test_auto_keeps_static_when_render_has_no_more_body_hits(
+        monkeypatch, site_server):
     calls = _install(
         monkeypatch,
         JS_HTML.replace("</body>", "<p>alpha</p></body>"),
@@ -75,8 +77,9 @@ def test_auto_escalates_on_js_driven_few_hits(monkeypatch, site_server):
         "<a href='x.html' title='alpha 链接'>x</a></body></html>")
     data = _post(site_server).json()
     assert calls == [False, True]
-    assert data["render"] is True
-    assert data["totalHits"] >= 3
+    assert data["render"] is False
+    assert data["totalHits"] == 1
+    assert data["autoNote"]
 
 
 def test_auto_keeps_static_when_render_not_better(monkeypatch, site_server):
@@ -99,3 +102,47 @@ def test_render_on_off_modes(monkeypatch, site_server):
 
 def test_invalid_render_mode_rejected(site_server):
     assert _post(site_server, render="maybe").status_code == 422
+
+
+def test_auto_static_render_and_discovery_share_120_attempt_budget(
+        monkeypatch, site_server):
+    budgets = []
+
+    async def fake_crawl(url, **kwargs):
+        budget = kwargs["budget"]
+        budgets.append(budget)
+        for _ in range(30):
+            assert budget.reserve_html()
+        html = (
+            "<html><body>alpha 渲染命中</body></html>"
+            if kwargs["render"]
+            else JS_HTML
+        )
+        return CrawlResult(pages=[CrawledPage(url, html)])
+
+    async def fake_discover(*args, **kwargs):
+        budget = kwargs["budget"]
+        budgets.append(budget)
+        assert budget.used_html_pages == 60
+        assert budget.expand(high_value_remaining=1)
+        attempted = 0
+        while budget.reserve_html():
+            attempted += 1
+        assert attempted == 60
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(
+                partial=True, budget_expanded=True
+            ),
+        )
+
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    monkeypatch.setattr(server, "expand_keywords", _no_expand)
+
+    response = _post(site_server)
+
+    assert response.status_code == 200
+    assert len({id(item) for item in budgets}) == 1
+    assert budgets[0].used_html_pages == 120

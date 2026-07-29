@@ -1,6 +1,9 @@
 """matcher.py 的单元测试：覆盖全部 kind、大小写、片段、去重。"""
-from matcher import (SNIPPET_RADIUS, extract_title, looks_js_driven,
-                    make_snippet, match_page)
+from types import SimpleNamespace
+
+from matcher import (SNIPPET_RADIUS, extract_main_text, extract_title,
+                    looks_js_driven, make_snippet, match_body_crawl_result,
+                    match_body_page, match_page)
 
 PAGE = "http://test.local/page"
 
@@ -117,3 +120,156 @@ def test_looks_js_driven_static_site_false():
     static = """<html><body><ul><li><a href="a.html">文章</a></li></ul>
     <script>console.log("analytics");</script></body></html>"""
     assert not looks_js_driven(static)
+
+
+def test_extract_main_text_removes_navigation_and_footer():
+    html = """
+    <html><body>
+      <nav>导航伪命中词</nav>
+      <main><article><p>真正正文随机标记 QX-7319</p></article></main>
+      <footer>页脚伪命中词</footer>
+    </body></html>
+    """
+    text = extract_main_text(html)
+    assert "QX-7319" in text
+    assert "导航伪命中词" not in text
+    assert "页脚伪命中词" not in text
+
+
+def test_match_body_page_ignores_title_url_and_search_metadata():
+    html = """
+    <html><head>
+      <title>标题只有 TITLE-ONLY</title>
+      <meta name="description" content="META-ONLY">
+    </head><body>
+      <nav><a href="/URL-ONLY">LINK-ONLY</a></nav>
+      <article><p>正文唯一标记 BODY-ONLY-8472</p></article>
+    </body></html>
+    """
+    hits = match_body_page(
+        html, "https://x.test/URL-ONLY", [
+            "TITLE-ONLY", "META-ONLY", "LINK-ONLY", "BODY-ONLY-8472",
+        ])
+    assert [hit.keyword for hit in hits] == ["BODY-ONLY-8472"]
+    assert "正文唯一标记" in hits[0].snippet
+
+
+def test_extract_main_text_removes_noise_classes_and_hidden_content():
+    html = """
+    <body>
+      <div class="navbar">NAVBAR-NOISE</div>
+      <div class="sidebar">SIDEBAR-NOISE</div>
+      <div class="advert">ADVERT-NOISE</div>
+      <div class="ad">AD-NOISE</div>
+      <div class="login">LOGIN-NOISE</div>
+      <div hidden>HIDDEN-NOISE</div>
+      <div aria-hidden="true">ARIA-NOISE</div>
+      <main>正文标记 MAIN-MARK-3107</main>
+    </body>
+    """
+    text = extract_main_text(html)
+    assert "MAIN-MARK-3107" in text
+    assert all(noise not in text for noise in (
+        "NAVBAR-NOISE", "SIDEBAR-NOISE", "ADVERT-NOISE", "AD-NOISE",
+        "LOGIN-NOISE", "HIDDEN-NOISE", "ARIA-NOISE",
+    ))
+
+
+def test_extract_main_text_removes_aria_hidden_case_insensitively():
+    html = """
+    <main>
+      <div aria-hidden="TRUE">UPPER-HIDDEN-4182</div>
+      <div aria-hidden=" True ">MIXED-HIDDEN-5293</div>
+      <p>可见正文 VISIBLE-MARK-6304</p>
+    </main>
+    """
+    text = extract_main_text(html)
+    assert "VISIBLE-MARK-6304" in text
+    assert "UPPER-HIDDEN-4182" not in text
+    assert "MIXED-HIDDEN-5293" not in text
+
+
+def test_extract_main_text_uses_role_main():
+    html = """
+    <body>
+      <section>外围标记 OUTSIDE-MARK</section>
+      <section role="main">角色正文 ROLE-MAIN-5204</section>
+    </body>
+    """
+    text = extract_main_text(html)
+    assert text == "角色正文 ROLE-MAIN-5204"
+
+
+def test_extract_main_text_does_not_choose_tiny_article_over_main_content():
+    html = """
+    <body>
+      <article>短标签</article>
+      <main>
+      <section>完整正文中的标记 FULL-BODY-6421</section>
+      </main>
+    </body>
+    """
+    text = extract_main_text(html)
+    assert "FULL-BODY-6421" in text
+
+
+def test_extract_main_text_chooses_longer_main_over_long_article():
+    article_text = "文章片段" * 25
+    main_text = "完整正文" * 40 + " LONG-MAIN-7415"
+    html = (
+        f"<body><article>{article_text}</article>"
+        f"<main>{main_text}</main></body>"
+    )
+    text = extract_main_text(html)
+    assert "LONG-MAIN-7415" in text
+    assert text == main_text
+
+
+def test_match_body_page_strips_and_stably_deduplicates_keywords():
+    hits = match_body_page(
+        "<main>正文含有 Alpha 和 beta。</main>",
+        PAGE,
+        [" ", " Alpha ", "alpha", "", " beta ", "Alpha"],
+    )
+    assert [hit.keyword for hit in hits] == ["Alpha", "alpha", "beta"]
+    assert all(hit.kind == "text" for hit in hits)
+    assert hits[0].href == PAGE + "#:~:text=Alpha"
+    assert hits[0].linkHref is None
+
+
+def test_match_body_page_handles_missing_body_and_malformed_html():
+    assert match_body_page("<title>ONLY-TITLE</title>", PAGE,
+                           ["ONLY-TITLE"]) == []
+    hits = match_body_page(
+        "<main><p>未闭合正文 MALFORMED-7315",
+        PAGE,
+        ["MALFORMED-7315"],
+    )
+    assert [hit.keyword for hit in hits] == ["MALFORMED-7315"]
+
+
+def test_match_body_crawl_result_aggregates_only_matching_pages():
+    pages = [
+        SimpleNamespace(
+            url="https://x.test/one",
+            html="<title>第一页</title><main>正文 FIRST-8426</main>",
+        ),
+        SimpleNamespace(
+            url="https://x.test/two",
+            html="<title>标题 SECOND-ONLY</title><main>没有匹配</main>",
+        ),
+        SimpleNamespace(
+            url="https://x.test/three",
+            html="<title>第三页</title><article>SECOND-9537 FIRST-8426</article>",
+        ),
+    ]
+    results, total = match_body_crawl_result(
+        pages, ["FIRST-8426", "SECOND-9537"])
+    assert total == 3
+    assert [item["pageUrl"] for item in results] == [
+        "https://x.test/one", "https://x.test/three",
+    ]
+    assert [item["pageTitle"] for item in results] == ["第一页", "第三页"]
+    assert [hit["keyword"] for hit in results[1]["hits"]] == [
+        "FIRST-8426", "SECOND-9537",
+    ]

@@ -9,6 +9,9 @@ can still be discovered.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
+from urllib.parse import urljoin
 
 RENDER_TIMEOUT_MS = 25_000
 NETWORK_IDLE_MS = 6_000
@@ -19,6 +22,13 @@ RENDER_CONCURRENCY = 2
 
 class RenderError(Exception):
     """Rendering failed (navigation error, HTTP error, browser missing)."""
+
+
+@dataclass(frozen=True)
+class RenderedPage:
+    html: str
+    links: list[str]
+    final_url: str
 
 
 # Browser 与事件循环绑定：换 loop（如测试里多次 asyncio.run）必须重建
@@ -189,30 +199,136 @@ async def _harvest_pagination(page, seen: set[str]) -> tuple[set[str], list[str]
     return extra, html_parts
 
 
-async def render_page(url: str) -> tuple[str, list[str]]:
-    """渲染 URL，返回 (最终 HTML, 页面及翻页中发现的全部 http(s) 链接)。"""
+async def render_page_result(
+    url: str,
+    navigation_allowed: Callable[[str], bool] | None = None,
+    reserve_request: Callable[[], bool] | None = None,
+) -> RenderedPage:
+    """Render a page and retain the browser's effective URL after navigation."""
     browser = await _get_browser()
     async with _state["sem"]:
         page = await browser.new_page()
         try:
+            blocked_navigation: str | None = None
+            budget_exhausted = False
+            if navigation_allowed is not None or reserve_request is not None:
+                async def guard_navigation(route, request):
+                    nonlocal blocked_navigation, budget_exhausted
+                    is_main_document = (
+                        request.is_navigation_request()
+                        and request.resource_type == "document"
+                        and request.frame == page.main_frame
+                    )
+                    if is_main_document:
+                        if (
+                            reserve_request is not None
+                            and not reserve_request()
+                        ):
+                            budget_exhausted = True
+                            await route.abort("blockedbyclient")
+                            return
+                        if navigation_allowed is None:
+                            await route.continue_()
+                            return
+                        try:
+                            direct_allowed = navigation_allowed(request.url)
+                        except Exception:
+                            direct_allowed = False
+                        if not direct_allowed:
+                            blocked_navigation = request.url
+                            await route.abort("blockedbyclient")
+                            return
+                        response = await route.fetch(max_redirects=0)
+                        current_url = response.url
+                        current_response = response
+                        extra_responses = []
+                        try:
+                            for _hop in range(11):
+                                location = current_response.headers.get(
+                                    "location"
+                                )
+                                if (
+                                    current_response.status
+                                    not in {301, 302, 303, 307, 308}
+                                    or not location
+                                ):
+                                    break
+                                target = urljoin(current_url, location)
+                                try:
+                                    allowed = navigation_allowed(target)
+                                except Exception:
+                                    allowed = False
+                                if not allowed:
+                                    blocked_navigation = target
+                                    await route.abort("blockedbyclient")
+                                    return
+                                if (
+                                    reserve_request is not None
+                                    and not reserve_request()
+                                ):
+                                    budget_exhausted = True
+                                    await route.abort("blockedbyclient")
+                                    return
+                                current_url = target
+                                current_response = (
+                                    await page.context.request.get(
+                                        target,
+                                        max_redirects=0,
+                                        fail_on_status_code=False,
+                                    )
+                                )
+                                extra_responses.append(current_response)
+                            else:
+                                blocked_navigation = current_url
+                                await route.abort("blockedbyclient")
+                                return
+                            await route.fulfill(response=response)
+                            return
+                        finally:
+                            for extra in extra_responses:
+                                await extra.dispose()
+                    await route.continue_()
+
+                await page.route("**/*", guard_navigation)
             try:
                 resp = await page.goto(
                     url, timeout=RENDER_TIMEOUT_MS,
                     wait_until="domcontentloaded")
             except Exception as exc:
+                if budget_exhausted:
+                    raise RenderError("页面预算已用尽") from exc
+                if blocked_navigation is not None:
+                    raise RenderError("重定向到站外地址") from exc
                 raise RenderError(f"页面加载失败：{exc}") from exc
+            if blocked_navigation is not None:
+                raise RenderError("重定向到站外地址")
+            if budget_exhausted:
+                raise RenderError("页面预算已用尽")
             if resp is not None and resp.status >= 400:
                 raise RenderError(f"HTTP {resp.status}")
             await _wait_idle(page)
+            if blocked_navigation is not None:
+                raise RenderError("重定向到站外地址")
             links = set(await _collect_links(page))
             initial_html = await page.content()
             extra, html_parts = await _harvest_pagination(page, set(links))
             links |= extra
             # 拼接初始与每个翻页状态的 HTML，避免内容被覆盖丢失
             html = "\n".join([initial_html, *html_parts])
-            return html, sorted(links)
+            return RenderedPage(html, sorted(links), page.url)
         finally:
             try:
                 await page.close()
             except Exception:
                 pass
+
+
+async def render_page(
+    url: str,
+    reserve_request: Callable[[], bool] | None = None,
+) -> tuple[str, list[str]]:
+    """渲染 URL，返回 (最终 HTML, 页面及翻页中发现的全部 http(s) 链接)。"""
+    result = await render_page_result(
+        url, reserve_request=reserve_request
+    )
+    return result.html, result.links

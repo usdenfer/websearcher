@@ -21,19 +21,22 @@ def search(site_server, keywords, depth=1):
 def test_search_with_expansion(monkeypatch, site_server):
     async def fake_expand(keywords, host):
         assert host.startswith("127.0.0.1")
-        return ["beta"]
+        return ["visible"]
     monkeypatch.setattr(server, "expand_keywords", fake_expand)
 
     resp = search(site_server, ["alpha"])
     assert resp.status_code == 200
     data = resp.json()
     assert data["keywords"] == ["alpha"]
-    assert data["expandedKeywords"] == ["beta"]
+    assert data["expandedKeywords"] == ["visible"]
     assert data["searchId"]
-    # 扩展词 "beta" 参与匹配：首页 img-alt "Beta diagram" 应命中
+    # 扩展词参与正文匹配，图片 alt 等属性不能单独产生命中。
     index_page = next(r for r in data["results"]
                       if r["pageUrl"].endswith("/index.html"))
-    assert any(h["kind"] == "img-alt" for h in index_page["hits"])
+    assert any(
+        h["kind"] == "text" and h["keyword"] == "visible"
+        for h in index_page["hits"]
+    )
     # 缓存可读且包含页面文本
     entry = cache.get(data["searchId"])
     assert entry and entry["texts"]

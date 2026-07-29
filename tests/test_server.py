@@ -1,6 +1,14 @@
 """server.py 的接口测试：端到端搜索、未命中、参数校验、起始页失败。"""
+import asyncio
+import time
+
+import pytest
 from fastapi.testclient import TestClient
 
+import server
+from crawler import CrawledPage, CrawlResult
+from discovery.engine import DiscoveryRun
+from discovery.models import DiscoveryStats
 from server import app
 
 client = TestClient(app)
@@ -17,6 +25,23 @@ def test_search_hit_structure(site_server):
     resp = search(site_server, ["alpha", "beta"])
     assert resp.status_code == 200
     data = resp.json()
+    assert {
+        "startUrl",
+        "keywords",
+        "expandedKeywords",
+        "depth",
+        "render",
+        "renderMode",
+        "autoNote",
+        "siteSearch",
+        "pagesCrawled",
+        "crawledPages",
+        "pagesFailed",
+        "totalHits",
+        "results",
+        "searchId",
+        "discovery",
+    } <= data.keys()
     assert data["pagesCrawled"] == 3
     assert len(data["crawledPages"]) == 3
     assert data["pagesFailed"] == [
@@ -26,11 +51,275 @@ def test_search_hit_structure(site_server):
                 if r["pageUrl"].endswith("/index.html"))
     assert page["pageTitle"] == "Fixture Home"
     hit_kinds = {h["kind"] for h in page["hits"]}
-    assert "text" in hit_kinds and "img-alt" in hit_kinds
+    assert hit_kinds == {"text"}
     for hit in page["hits"]:
         assert set(hit) == {"kind", "snippet", "keyword", "href", "linkHref"}
     text_hit = next(h for h in page["hits"] if h["kind"] == "text")
     assert "#:~:text=" in text_hit["href"]
+
+
+def test_search_follows_redirect_and_finds_relative_article_body(
+        monkeypatch, redirect_site):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def no_discovery(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="generic"),
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "discover_pages", no_discovery)
+    response = client.post("/api/search", json={
+        "startUrl": redirect_site["start"],
+        "keywords": [redirect_site["keyword"]],
+        "depth": 1,
+        "render": "off",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["crawledPages"][:2] == [
+        redirect_site["home"],
+        redirect_site["article"],
+    ]
+    assert any(
+        item["pageUrl"] == redirect_site["article"]
+        for item in data["results"]
+    )
+
+
+def test_search_response_contains_discovery_diagnostics(site_server):
+    resp = client.post("/api/search", json={
+        "startUrl": f"{site_server}/index.html",
+        "keywords": ["alpha"],
+        "depth": 1,
+        "render": "off",
+    })
+    assert resp.status_code == 200
+    discovery = resp.json()["discovery"]
+    assert discovery["profile"]
+    assert isinstance(discovery["sourcesTried"], list)
+    assert discovery["candidatesFound"] >= discovery["candidatesFetched"]
+    assert discovery["elapsedMs"] >= 0
+    assert isinstance(discovery["partial"], bool)
+
+
+def test_search_matches_keyword_only_in_discovered_body(
+        monkeypatch, site_server):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_discover(*args, **kwargs):
+        stats = DiscoveryStats(
+            profile="generic",
+            sources_tried={"sitemap"},
+            sources_succeeded={"sitemap"},
+            candidates_found=1,
+            candidates_fetched=1,
+        )
+        return DiscoveryRun(
+            pages=[CrawledPage(
+                url=f"{site_server}/opaque-article.html",
+                html=("<html><head><title>普通标题</title></head>"
+                      "<body><main>正文中的 BODY-MARK-9184</main></body>"
+                      "</html>"),
+            )],
+            failed=[],
+            stats=stats,
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "discover_pages", fake_discover,
+                        raising=False)
+    resp = client.post("/api/search", json={
+        "startUrl": f"{site_server}/index.html",
+        "keywords": ["BODY-MARK-9184"],
+        "depth": 1,
+        "render": "off",
+    })
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert any(
+        item["pageUrl"].endswith("/opaque-article.html")
+        for item in results
+    )
+
+
+def test_api_reserves_budget_for_structured_discovery(
+        monkeypatch, site_server):
+    crawl_calls = []
+    discovery_calls = []
+
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        crawl_calls.append(kwargs)
+        return CrawlResult(pages=[
+            CrawledPage(url=url, html="<html><main>alpha</main></html>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        discovery_calls.append((args, kwargs))
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="generic"),
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover,
+                        raising=False)
+    before = time.monotonic()
+    response = client.post("/api/search", json={
+        "startUrl": f"{site_server}/index.html",
+        "keywords": ["alpha"],
+        "depth": 3,
+        "render": "off",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pagesCrawled"] <= 120
+    assert "discovery" in data
+    assert crawl_calls[0]["max_pages"] == server.BASE_BFS_PAGE_BUDGET
+    assert crawl_calls[0]["deadline"] >= before
+    assert crawl_calls[0]["budget"].initial_pages == 60
+    assert crawl_calls[0]["budget"].max_pages == 120
+    args, kwargs = discovery_calls[0]
+    assert args[0] == f"{site_server}/index.html"
+    assert args[1] == ["alpha"]
+    assert args[3:5] == (3, "off")
+    assert kwargs["budget"] is crawl_calls[0]["budget"]
+
+
+def test_discovery_failure_returns_base_body_results(
+        monkeypatch, site_server):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(
+                url=url,
+                html="<html><main>alpha 基础正文</main></html>",
+            )
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        raise RuntimeError("secret-token-must-not-leak")
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    response = client.post("/api/search", json={
+        "startUrl": f"{site_server}/index.html",
+        "keywords": ["alpha"],
+        "depth": 1,
+        "render": "off",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["totalHits"] == 1
+    assert data["discovery"]["profile"] == "generic"
+    assert data["discovery"]["partial"] is True
+    assert data["discovery"]["elapsedMs"] >= 0
+    assert data["discovery"]["warnings"] == [
+        "discovery: RuntimeError"
+    ]
+    assert "secret-token" not in response.text
+    assert data["siteSearch"] == {
+        "available": False,
+        "linksFound": 0,
+        "pagesFetched": 0,
+        "deprecated": True,
+    }
+
+
+def test_discovery_cancellation_propagates(monkeypatch):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url=url, html="<html><main>alpha</main></html>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    request = server.SearchRequest(
+        startUrl="https://cancel.test/",
+        keywords=["alpha"],
+        depth=1,
+        render="off",
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server.search(request))
+
+
+def test_empty_start_page_result_returns_502(monkeypatch):
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(
+            pages=[],
+            failed=[{"url": url, "reason": "搜索截止时间已到"}],
+        )
+
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    with pytest.raises(server.HTTPException) as raised:
+        asyncio.run(server._crawl_or_502(
+            "https://deadline.test/",
+            depth=1,
+            render=False,
+            deadline=time.monotonic(),
+        ))
+    assert raised.value.status_code == 502
+    assert "搜索截止时间已到" in raised.value.detail
+
+
+def test_keyword_expansion_obeys_end_to_end_deadline(monkeypatch):
+    cancelled = False
+
+    async def slow_expand(keywords, host):
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url, "<main>alpha</main>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(),
+        )
+
+    monkeypatch.setattr(server, "SEARCH_BUDGET_SECONDS", 0.02)
+    monkeypatch.setattr(server, "expand_keywords", slow_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    request = server.SearchRequest(
+        startUrl="https://deadline.test/",
+        keywords=["alpha"],
+        render="off",
+    )
+
+    response = asyncio.run(server.search(request))
+
+    assert cancelled is True
+    assert response["expandedKeywords"] == []
 
 
 def test_search_no_hit(site_server):

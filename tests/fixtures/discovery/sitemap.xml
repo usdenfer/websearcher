@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.test/news/1.html</loc></url>
+  <url><loc>https://example.test/news/2.html</loc></url>
+  <url><loc>https://example.test/news/2.html#duplicate</loc></url>
+  <url><loc>http://[invalid</loc></url>
+</urlset>

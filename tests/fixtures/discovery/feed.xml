@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item><title>条目一</title><link>https://example.test/news/3.html</link></item>
+  <item><title>条目一重复</title><link>https://example.test/news/3.html#copy</link></item>
+  <item><title>站外条目</title><link>https://outside.test/news/4.html</link></item>
+</channel></rss>

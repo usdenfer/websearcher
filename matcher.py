@@ -11,6 +11,20 @@ SNIPPET_RADIUS = 60
 
 META_NAME_KEYS = {"keywords", "description"}
 SKIP_TEXT_PARENTS = {"script", "style", "noscript", "a", "title"}
+NOISE_SELECTORS = (
+    "script, style, noscript, nav, header, footer, aside, "
+    "[hidden], [aria-hidden='true'], .nav, .navbar, .footer, "
+    ".sidebar, .advert, .ad, .login"
+)
+MAIN_CONTENT_SELECTORS = (
+    "article",
+    "main",
+    "[role='main']",
+    ".article-content",
+    ".content-main",
+    ".article_body",
+    ".detail-content",
+)
 
 
 @dataclass
@@ -150,6 +164,56 @@ def extract_text(html: str, limit: int = 3000) -> str:
     return " ".join(chunks)[:limit]
 
 
+def _node_text(node) -> str:
+    return re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+
+
+def extract_main_text(html: str) -> str:
+    """Return normalized text from the page's most likely article container."""
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup.select(NOISE_SELECTORS):
+        node.decompose()
+    for node in soup.select("[aria-hidden]"):
+        value = node.get("aria-hidden")
+        if isinstance(value, str) and value.strip().lower() == "true":
+            node.decompose()
+
+    candidates: list[tuple[object, str]] = []
+    seen: set[int] = set()
+    for selector in MAIN_CONTENT_SELECTORS:
+        for node in soup.select(selector):
+            identity = id(node)
+            text = _node_text(node)
+            if identity not in seen and text:
+                seen.add(identity)
+                candidates.append((node, text))
+
+    preferred = None
+    if candidates:
+        preferred = max(candidates, key=lambda item: len(item[1]))[0]
+    root = preferred or soup.body
+    return _node_text(root) if root is not None else ""
+
+
+def match_body_page(
+    html: str, page_url: str, keywords: list[str],
+) -> list[Hit]:
+    """Match keywords only against the extracted article body."""
+    text = extract_main_text(html)
+    result: list[Hit] = []
+    for keyword in dict.fromkeys(k.strip() for k in keywords if k.strip()):
+        snippet = make_snippet(text, keyword)
+        if snippet is None:
+            continue
+        result.append(Hit(
+            kind="text",
+            snippet=snippet,
+            keyword=keyword,
+            href=f"{page_url}#:~:text={quote(keyword)}",
+        ))
+    return result
+
+
 _JS_DRIVEN_RE = re.compile(
     r"\$\.ajax|\$\.get\(|\$\.post\(|\$\.getJSON|getScript|"
     r"XMLHttpRequest|\.load\(\s*['\"]",
@@ -176,5 +240,24 @@ def match_crawl_result(pages, keywords: list[str]) -> tuple[list[dict], int]:
             "pageUrl": page.url,
             "pageTitle": extract_title(page.html),
             "hits": [asdict(h) for h in hits],
+        })
+    return results, total_hits
+
+
+def match_body_crawl_result(
+    pages, keywords: list[str],
+) -> tuple[list[dict], int]:
+    """Aggregate article-body-only matches in the API response shape."""
+    results: list[dict] = []
+    total_hits = 0
+    for page in pages:
+        hits = match_body_page(page.html, page.url, keywords)
+        if not hits:
+            continue
+        total_hits += len(hits)
+        results.append({
+            "pageUrl": page.url,
+            "pageTitle": extract_title(page.html),
+            "hits": [asdict(hit) for hit in hits],
         })
     return results, total_hits
