@@ -9,7 +9,8 @@ can still be discovered.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
@@ -125,6 +126,24 @@ async def _get_browser():
     return browser
 
 
+@asynccontextmanager
+async def browser_page_session() -> AsyncIterator[object]:
+    """Yield one page from the shared Chromium under its concurrency limit."""
+    browser = await _get_browser()
+    async with _state["sem"]:
+        try:
+            page = await browser.new_page()
+        except Exception:
+            raise RenderError("浏览器页面创建失败") from None
+        try:
+            yield page
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
 async def _wait_idle(page) -> None:
     try:
         await page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
@@ -205,9 +224,7 @@ async def render_page_result(
     reserve_request: Callable[[], bool] | None = None,
 ) -> RenderedPage:
     """Render a page and retain the browser's effective URL after navigation."""
-    browser = await _get_browser()
-    async with _state["sem"]:
-        page = await browser.new_page()
+    async with browser_page_session() as page:
         try:
             blocked_navigation: str | None = None
             budget_exhausted = False
@@ -317,10 +334,7 @@ async def render_page_result(
             html = "\n".join([initial_html, *html_parts])
             return RenderedPage(html, sorted(links), page.url)
         finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
+            pass
 
 
 async def render_page(

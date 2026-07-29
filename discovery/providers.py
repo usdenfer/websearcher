@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections import deque
+from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from urllib.parse import (
     parse_qsl,
@@ -675,6 +676,7 @@ class FreeCmsApiProvider(Provider):
 
 class FreeCmsRecentProvider(Provider):
     source = "freecms-recent"
+    browser_budget_source = "freecms-recent-browser"
 
     def __init__(
         self,
@@ -686,30 +688,25 @@ class FreeCmsRecentProvider(Provider):
         *,
         today: date | None = None,
         max_pages: int = 80,
+        browser_loader_factory=None,
     ):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
         self.today = today
         self.max_pages = max_pages
+        if browser_loader_factory is None:
+            from discovery.freecms_browser import freecms_browser_loader
 
-    async def discover(self, keywords: list[str]) -> list[Candidate]:
-        spec = self.adapter.recent_notice_spec()
-        if spec is None:
-            return []
+            browser_loader_factory = freecms_browser_loader
+        self.browser_loader_factory = browser_loader_factory
 
-        self.stats.recent_window_days = 30
-        await _warm_freecms_session(
-            self.client,
-            self.budget,
-            self.stats,
-            self.adapter,
-            self.source,
-        )
-        if self.budget.expired():
-            self.stats.partial = True
-            self.stats.note_stop("time-budget")
-            return []
-
+    async def _crawl_recent(
+        self,
+        spec: SearchSpec,
+        load_page: Callable[
+            [int], Awaitable[tuple[str, str] | None]
+        ],
+    ) -> tuple[list[Candidate], bool]:
         cutoff = (self.today or date.today()) - timedelta(days=30)
         result: list[Candidate] = []
         seen: set[str] = set()
@@ -722,12 +719,7 @@ class FreeCmsRecentProvider(Provider):
                 self.stats.partial = True
                 self.stats.note_stop("time-budget")
                 break
-            loaded = await self.get_text(
-                spec.url,
-                limit=self.max_pages,
-                params=spec.params_for("", page),
-                counts_as_html=False,
-            )
+            loaded = await load_page(page)
             if loaded is None:
                 if self.budget.expired():
                     self.stats.partial = True
@@ -809,6 +801,138 @@ class FreeCmsRecentProvider(Provider):
             if dates_nonincreasing and page_has_expired_date:
                 self.stats.note_stop("date-boundary")
                 break
+
+        return result, business_success
+
+    def _reserve_browser_navigation_budget(self) -> bool:
+        if self.budget.expired():
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+            return False
+        request_limit = self.max_pages + 2
+        provider_used = self.budget.provider_requests.get(
+            self.browser_budget_source, 0
+        )
+        available = self.budget.page_limit - self.budget.used_html_pages
+        if available < 2:
+            self.stats.partial = True
+            self.stats.note_stop("html-page-budget")
+            return False
+        if provider_used + 2 > request_limit:
+            self.stats.note_stop("provider-page-limit")
+            return False
+        reserved_provider = (
+            self.budget.reserve_provider(
+                self.browser_budget_source, request_limit
+            )
+            and self.budget.reserve_provider(
+                self.browser_budget_source, request_limit
+            )
+        )
+        if not reserved_provider:
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+            else:
+                self.stats.note_stop("provider-page-limit")
+            return False
+        return self.budget.reserve_html() and self.budget.reserve_html()
+
+    async def _crawl_browser(
+        self,
+        spec: SearchSpec,
+    ) -> tuple[list[Candidate], bool]:
+        if not self._reserve_browser_navigation_budget():
+            return [], False
+
+        browser_failed = False
+
+        async def load_page(page: int):
+            nonlocal browser_failed
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                return None
+            if not self.budget.reserve_provider(
+                self.browser_budget_source,
+                self.max_pages + 2,
+            ):
+                if self.budget.expired():
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                return None
+            remaining = self.budget.remaining_seconds()
+            try:
+                async with asyncio.timeout(remaining):
+                    loaded = await loader.load(spec, page)
+            except TimeoutError:
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                return None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                loaded = None
+            if loaded is None:
+                browser_failed = True
+            return loaded
+
+        result: list[Candidate] = []
+        success = False
+        try:
+            remaining = self.budget.remaining_seconds()
+            async with asyncio.timeout(remaining):
+                async with self.browser_loader_factory(
+                    self.adapter.origin
+                ) as loader:
+                    self.stats.rendered_pages += 2
+                    result, success = await self._crawl_recent(
+                        spec, load_page
+                    )
+        except TimeoutError:
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            browser_failed = True
+        if not success and browser_failed:
+            self.stats.warnings.append(
+                f"{self.source}: browser fallback failed"
+            )
+        return result, success
+
+    async def discover(self, keywords: list[str]) -> list[Candidate]:
+        spec = self.adapter.recent_notice_spec()
+        if spec is None:
+            return []
+
+        self.stats.recent_window_days = 30
+        await _warm_freecms_session(
+            self.client,
+            self.budget,
+            self.stats,
+            self.adapter,
+            self.source,
+        )
+        if self.budget.expired():
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+            return []
+
+        async def load_static(page: int):
+            return await self.get_text(
+                spec.url,
+                limit=self.max_pages,
+                params=spec.params_for("", page),
+                counts_as_html=False,
+            )
+
+        result, business_success = await self._crawl_recent(
+            spec, load_static
+        )
+        if not business_success and not self.budget.expired():
+            result, business_success = await self._crawl_browser(spec)
 
         if business_success:
             self.stats.sources_succeeded.add(self.source)
