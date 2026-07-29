@@ -39,6 +39,15 @@ def test_search_budget_expands_for_zycg_hosts(start_url):
     assert budget.started_at == started_at
 
 
+def test_normalize_dns_hostname_handles_ascii_and_idna():
+    assert server._normalize_dns_hostname(
+        "WWW.ZYCG.GOV.CN"
+    ) == "www.zycg.gov.cn"
+    assert server._normalize_dns_hostname(
+        "例子.中国"
+    ) == "xn--fsqu00a.xn--fiqs8s"
+
+
 @pytest.mark.parametrize(
     "start_url",
     [
@@ -46,6 +55,22 @@ def test_search_budget_expands_for_zycg_hosts(start_url):
         "https://evilzycg.gov.cn/",
         "https://zycg.gov.cn.evil.example/",
         "https://[broken",
+        "https://foo..zycg.gov.cn/",
+        "https://-bad.zycg.gov.cn/",
+        "https://bad-.zycg.gov.cn/",
+        "https://.zycg.gov.cn/",
+        f"https://{'a' * 64}.zycg.gov.cn/",
+        (
+            "https://"
+            + ".".join(["a" * 63] * 4)
+            + ".zycg.gov.cn/"
+        ),
+        "https://bad_name.zycg.gov.cn/",
+        "https://user:secret@www.zycg.gov.cn/",
+        "https://www.zycg.gov.cn:99999/",
+        "https://www.zycg.gov.cn:not-a-port/",
+        "ftp://www.zycg.gov.cn/",
+        "https://例子.中国/",
     ],
 )
 def test_search_budget_uses_generic_limits_for_other_or_invalid_hosts(

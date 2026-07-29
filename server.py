@@ -130,6 +130,30 @@ def _match_crawl(crawl_result, all_keywords: list[str]) -> tuple[list, int]:
     return match_body_crawl_result(crawl_result.pages, all_keywords)
 
 
+def _normalize_dns_hostname(hostname: str) -> str | None:
+    try:
+        normalized = hostname.encode("idna").decode("ascii").lower()
+    except (UnicodeError, ValueError):
+        return None
+    if len(normalized) > 253:
+        return None
+    labels = normalized.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or not all(
+            character.isascii()
+            and (character.isalnum() or character == "-")
+            for character in label
+        )
+        for label in labels
+    ):
+        return None
+    return normalized
+
+
 def _search_budget(
     start_url: str,
     archive_mode: bool,
@@ -143,11 +167,22 @@ def _search_budget(
             started_at=started_at,
         )
     try:
-        hostname = urlsplit(start_url).hostname
+        parts = urlsplit(start_url)
+        hostname = parts.hostname
+        _ = parts.port
     except (TypeError, UnicodeError, ValueError):
         hostname = None
-    if hostname is not None:
-        hostname = hostname.lower()
+        parts = None
+    if (
+        parts is None
+        or parts.scheme.lower() not in {"http", "https"}
+        or parts.username is not None
+        or parts.password is not None
+        or hostname is None
+    ):
+        hostname = None
+    else:
+        hostname = _normalize_dns_hostname(hostname)
     if hostname == "zycg.gov.cn" or (
         hostname is not None
         and hostname.endswith(".zycg.gov.cn")
