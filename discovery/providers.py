@@ -707,11 +707,12 @@ class FreeCmsRecentProvider(Provider):
         load_page: Callable[
             [int], Awaitable[tuple[str, str] | None]
         ],
-    ) -> tuple[list[Candidate], bool]:
+    ) -> tuple[list[Candidate], bool, bool]:
         cutoff = (self.today or date.today()) - timedelta(days=30)
         result: list[Candidate] = []
         seen: set[str] = set()
-        business_success = False
+        any_business_success = False
+        clean_completion = False
         dates_nonincreasing = True
         last_valid_date: date | None = None
 
@@ -733,8 +734,9 @@ class FreeCmsRecentProvider(Provider):
                 self.stats.warnings.append(f"{self.source}: {warning}")
                 break
 
-            business_success = True
+            any_business_success = True
             if not rows:
+                clean_completion = True
                 break
 
             parsed_rows: list[tuple[dict, date | None]] = []
@@ -799,11 +801,13 @@ class FreeCmsRecentProvider(Provider):
 
             if page == self.max_pages:
                 self.stats.note_stop("provider-page-limit")
+                clean_completion = True
             if dates_nonincreasing and page_has_expired_date:
                 self.stats.note_stop("date-boundary")
+                clean_completion = True
                 break
 
-        return result, business_success
+        return result, any_business_success, clean_completion
 
     def _reserve_browser_navigation_budget(self) -> bool:
         if self.budget.expired():
@@ -815,6 +819,14 @@ class FreeCmsRecentProvider(Provider):
             self.browser_budget_source, 0
         )
         available = self.budget.page_limit - self.budget.used_html_pages
+        if (
+            available < 2
+            and self.budget.expand(high_value_remaining=1)
+        ):
+            self.stats.budget_expanded = True
+            available = (
+                self.budget.page_limit - self.budget.used_html_pages
+            )
         if available < 2:
             self.stats.partial = True
             self.stats.note_stop("html-page-budget")
@@ -842,9 +854,9 @@ class FreeCmsRecentProvider(Provider):
     async def _crawl_browser(
         self,
         spec: SearchSpec,
-    ) -> tuple[list[Candidate], bool]:
+    ) -> tuple[list[Candidate], bool, bool]:
         if not self._reserve_browser_navigation_budget():
-            return [], False
+            return [], False, False
 
         browser_failed = False
 
@@ -879,7 +891,8 @@ class FreeCmsRecentProvider(Provider):
             return loaded
 
         result: list[Candidate] = []
-        success = False
+        any_business_success = False
+        clean_completion = False
         try:
             remaining = self.budget.remaining_seconds()
             factory_parameters = inspect.signature(
@@ -901,9 +914,11 @@ class FreeCmsRecentProvider(Provider):
             async with asyncio.timeout(remaining):
                 async with loader_context as loader:
                     self.stats.rendered_pages += 2
-                    result, success = await self._crawl_recent(
-                        spec, load_page
-                    )
+                    (
+                        result,
+                        any_business_success,
+                        clean_completion,
+                    ) = await self._crawl_recent(spec, load_page)
         except TimeoutError:
             self.stats.partial = True
             self.stats.note_stop("time-budget")
@@ -911,11 +926,11 @@ class FreeCmsRecentProvider(Provider):
             raise
         except Exception:
             browser_failed = True
-        if not success and browser_failed:
+        if not clean_completion and browser_failed:
             self.stats.warnings.append(
                 f"{self.source}: browser fallback failed"
             )
-        return result, success
+        return result, any_business_success, clean_completion
 
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         spec = self.adapter.recent_notice_spec()
@@ -943,18 +958,25 @@ class FreeCmsRecentProvider(Provider):
                 counts_as_html=False,
             )
 
-        result, business_success = await self._crawl_recent(
-            spec, load_static
-        )
-        if not business_success and not self.budget.expired():
-            result, business_success = await self._crawl_browser(spec)
+        (
+            result,
+            any_business_success,
+            clean_completion,
+        ) = await self._crawl_recent(spec, load_static)
+        if not any_business_success and not self.budget.expired():
+            (
+                result,
+                any_business_success,
+                clean_completion,
+            ) = await self._crawl_browser(spec)
 
-        if business_success:
+        if any_business_success:
             self.stats.sources_succeeded.add(self.source)
         else:
             self.stats.sources_succeeded.discard(self.source)
+        if not clean_completion:
+            self.stats.partial = True
             if self.budget.expired():
-                self.stats.partial = True
                 self.stats.note_stop("time-budget")
             else:
                 self.stats.note_stop("channel-failure")

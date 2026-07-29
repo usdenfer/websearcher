@@ -1691,6 +1691,188 @@ def test_freecms_recent_html_budget_shortage_does_not_start_browser():
     asyncio.run(run())
 
 
+def test_freecms_recent_expands_html_budget_before_browser_navigation():
+    async def run():
+        factory_started = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/selectInfoMore.do"):
+                raise httpx.RemoteProtocolError(
+                    "transport failure",
+                    request=request,
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        class EmptyBrowserLoader:
+            async def load(self, spec: SearchSpec, _page: int):
+                return json.dumps({"code": 200, "data": []}), spec.url
+
+        @asynccontextmanager
+        async def browser_loader_factory(_origin: str):
+            nonlocal factory_started
+            factory_started = True
+            yield EmptyBrowserLoader()
+
+        budget = BudgetManager(
+            initial_pages=150,
+            max_pages=300,
+            used_html_pages=149,
+        )
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                budget,
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                browser_loader_factory=browser_loader_factory,
+            ).discover([])
+
+        assert result == []
+        assert factory_started is True
+        assert budget.page_limit == 300
+        assert budget.used_html_pages == 151
+        assert stats.budget_expanded is True
+        assert stats.partial is False
+        assert stats.stop_reason is None
+        assert stats.sources_succeeded == {"freecms-recent"}
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_static_interruption_keeps_results_and_is_partial():
+    async def run():
+        factory_started = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/selectInfoMore.do"):
+                return httpx.Response(200, text="<html></html>")
+            if request.url.params["currPage"] == "1":
+                return httpx.Response(
+                    200,
+                    text=json.dumps(
+                        {
+                            "code": 200,
+                            "data": [
+                                {
+                                    "pageUrl": "/notice/first",
+                                    "addtimeStr": "2026-07-20",
+                                }
+                            ],
+                        }
+                    ),
+                )
+            raise httpx.RemoteProtocolError(
+                "secret second page failure",
+                request=request,
+            )
+
+        @asynccontextmanager
+        async def browser_loader_factory(_origin: str):
+            nonlocal factory_started
+            factory_started = True
+            yield None
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+                browser_loader_factory=browser_loader_factory,
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://www.zycg.gov.cn/notice/first"
+        ]
+        assert factory_started is False
+        assert stats.sources_succeeded == {"freecms-recent"}
+        assert stats.partial is True
+        assert stats.stop_reason == "channel-failure"
+        assert stats.warnings == [
+            "freecms-recent: RemoteProtocolError"
+        ]
+        assert "secret" not in " ".join(stats.warnings)
+
+    asyncio.run(run())
+
+
+def test_freecms_recent_browser_interruption_keeps_results_and_is_partial():
+    async def run():
+        browser_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/selectInfoMore.do"):
+                raise httpx.RemoteProtocolError(
+                    "static failure",
+                    request=request,
+                )
+            return httpx.Response(200, text="<html></html>")
+
+        class InterruptedBrowserLoader:
+            async def load(self, spec: SearchSpec, page: int):
+                browser_pages.append(page)
+                if page == 1:
+                    return (
+                        json.dumps(
+                            {
+                                "code": 200,
+                                "data": [
+                                    {
+                                        "pageUrl": "/notice/browser-first",
+                                        "addtimeStr": "2026-07-20",
+                                    }
+                                ],
+                            }
+                        ),
+                        spec.url,
+                    )
+                return None
+
+        @asynccontextmanager
+        async def browser_loader_factory(_origin: str):
+            yield InterruptedBrowserLoader()
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+                browser_loader_factory=browser_loader_factory,
+            ).discover([])
+
+        assert [item.url for item in result] == [
+            "https://www.zycg.gov.cn/notice/browser-first"
+        ]
+        assert browser_pages == [1, 2]
+        assert stats.sources_succeeded == {"freecms-recent"}
+        assert stats.partial is True
+        assert stats.stop_reason == "channel-failure"
+        assert stats.warnings == [
+            "freecms-recent: RemoteProtocolError",
+            "freecms-recent: browser fallback failed",
+        ]
+
+    asyncio.run(run())
+
+
 def test_freecms_recent_successful_empty_page_is_not_channel_failure():
     async def run():
         def handler(request: httpx.Request) -> httpx.Response:
