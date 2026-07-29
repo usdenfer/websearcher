@@ -1184,6 +1184,47 @@ def test_freecms_recent_nonempty_last_page_notes_provider_limit():
     asyncio.run(run())
 
 
+def test_freecms_recent_provider_limit_outranks_date_boundary():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/selectInfoMore.do"):
+                return httpx.Response(200, text="<html></html>")
+            return httpx.Response(
+                200,
+                text=json.dumps(
+                    {
+                        "code": 200,
+                        "data": [
+                            {
+                                "pageUrl": "/notice/old",
+                                "addtimeStr": "2026-06-28",
+                            }
+                        ],
+                    }
+                ),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://www.zycg.gov.cn/")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsRecentProvider(
+                client,
+                BudgetManager(),
+                stats,
+                adapter.domain_policy(adapter.origin),
+                adapter,
+                today=date(2026, 7, 29),
+                max_pages=1,
+            ).discover([])
+
+        assert result == []
+        assert stats.stop_reason == "provider-page-limit"
+
+    asyncio.run(run())
+
+
 def test_freecms_recent_unsupported_site_does_not_mark_source_tried():
     async def run():
         calls = 0

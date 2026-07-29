@@ -727,11 +727,11 @@ class FreeCmsRecentProvider(Provider):
                     )
                 )
 
+            if page == self.max_pages:
+                self.stats.note_stop("provider-page-limit")
             if dates_nonincreasing and page_has_expired_date:
                 self.stats.note_stop("date-boundary")
                 break
-            if page == self.max_pages:
-                self.stats.note_stop("provider-page-limit")
 
         if business_success:
             self.stats.sources_succeeded.add(self.source)
