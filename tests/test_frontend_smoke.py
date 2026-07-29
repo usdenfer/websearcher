@@ -40,6 +40,19 @@ def test_frontend_escapes_discovery_warnings():
     assert ".slice(0, 5)" in html
 
 
+def test_frontend_labels_recall_strength_and_uses_safe_results_array():
+    html = STATIC_INDEX.read_text(encoding="utf-8")
+    assert "data.weakHits" in html
+    assert '"title-recall":"标题召回"' in html
+    assert '"freecms-recent"' in html
+    assert 'page.matchStrength === "weak"' in html
+    assert "正文命中" in html
+    assert "标题召回" in html
+    assert "Array.isArray(data.results)" in html
+    assert "resultValues.length === 0" in html
+    assert "data.totalHits === 0" not in html
+
+
 def _chromium_ok() -> bool:
     try:
         from playwright.sync_api import sync_playwright
@@ -167,6 +180,54 @@ def test_warning_formatter_hides_sensitive_details(app_server):
         ]
         assert "secret" not in " ".join(formatted)
         assert "https://" not in " ".join(formatted)
+        browser.close()
+
+
+def test_only_weak_recall_renders_result_card(app_server):
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "**/api/search",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                json={
+                    "searchId": "weak-only",
+                    "pagesCrawled": 1,
+                    "depth": 1,
+                    "render": False,
+                    "totalHits": 0,
+                    "weakHits": 1,
+                    "keywords": ["alpha"],
+                    "results": [{
+                        "pageUrl": "https://example.test/article",
+                        "pageTitle": "Alpha 标题召回结果",
+                        "matchStrength": "weak",
+                        "hits": [{
+                            "kind": "title-recall",
+                            "keyword": "alpha",
+                            "snippet": "Alpha 标题召回结果",
+                            "href": "https://example.test/article",
+                        }],
+                    }],
+                    "crawledPages": ["https://example.test/article"],
+                    "pagesFailed": [],
+                    "discovery": {},
+                },
+            ),
+        )
+        page.goto(app_server + "/")
+        page.fill("#url", "https://example.test/")
+        page.fill("#kw", "alpha")
+        page.click("#go")
+
+        page.wait_for_selector(".card", timeout=10_000)
+        assert "Alpha 标题召回结果" in page.text_content(".card")
+        assert "标题召回" in page.text_content(".card")
+        assert "均未出现" not in page.text_content("#out")
+        assert "所在页定位" not in page.text_content(".card")
         browser.close()
 
 

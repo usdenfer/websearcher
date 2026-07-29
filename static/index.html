@@ -180,7 +180,8 @@
 const KIND_LABELS = {
   "text":"正文","img-alt":"图片alt","img-src":"图片文件名",
   "title-attr":"title属性","aria-label":"aria标签","link-text":"链接文本",
-  "link-href":"链接地址","meta":"meta标签","form":"表单"
+  "link-href":"链接地址","meta":"meta标签","form":"表单",
+  "title-recall":"标题召回"
 };
 const out = document.getElementById("out");
 const btn = document.getElementById("go");
@@ -234,7 +235,8 @@ function escapeHtml(s) {
   }[c]));
 }
 const DISCOVERY_WARNING_CHANNELS = new Set([
-  "discovery", "site-search", "site-search-api", "sitemap", "feed", "category"
+  "discovery", "site-search", "site-search-api", "sitemap", "feed", "category",
+  "freecms-recent"
 ]);
 function formatDiscoveryWarning(value) {
   if (typeof value !== "string") return "";
@@ -311,6 +313,7 @@ async function run() {
 function render(data) {
   searchId = data.searchId || null;
   aiSection.hidden = !searchId;
+  const resultValues = Array.isArray(data.results) ? data.results : [];
   const el = document.getElementById("expandLine");
   if (data.expandedKeywords && data.expandedKeywords.length) {
     el.hidden = false;
@@ -332,13 +335,15 @@ function render(data) {
   )].slice(0, 5);
   let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（深度 ${data.depth} 层${data.render ? "，JS 渲染" : ""}${
     data.siteSearch && data.siteSearch.pagesFetched > 0
-      ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），命中 ${data.totalHits} 处。${
+      ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），正文命中 ${
+    escapeHtml(String(data.totalHits))} 处，标题召回 ${
+    escapeHtml(String(data.weakHits || 0))} 条。${
     sources ? `<br>有效发现来源：${escapeHtml(sources)}` : ""}${
     discovery.budgetExpanded ? "<br>已启用扩展页面预算。" : ""}${
     discovery.partial
       ? "<br><strong>已达到搜索预算，结果可能不完整。</strong>" : ""}${
     data.autoNote ? `<br>${escapeHtml(data.autoNote)}` : ""}</p>`;
-  if (data.totalHits === 0) {
+  if (resultValues.length === 0) {
     const kw = data.keywords.map(k => `「${escapeHtml(k)}」`).join("、");
     html += `<div class="empty"><h2>关键词 ${kw} 在已成功抓取的 ${data.pagesCrawled} 个页面中均未出现</h2>
       <div>已抓取的页面：</div><ul>` +
@@ -346,16 +351,19 @@ function render(data) {
         `<li><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></li>`
       ).join("") + `</ul></div>`;
   } else {
-    for (const page of data.results) {
+    for (const page of resultValues) {
+      const matchStrengthLabel = page.matchStrength === "weak"
+        ? "标题召回" : "正文命中";
       html += `<div class="card"><h2><a href="${escapeHtml(page.pageUrl)}" target="_blank" rel="noopener">${
         escapeHtml(page.pageTitle || page.pageUrl)}</a>
+        <span class="badge">${escapeHtml(matchStrengthLabel)}</span>
         <span class="linkref">${escapeHtml(page.pageUrl)}</span></h2>`;
       for (const hit of page.hits) {
         const locateOnPage = (hit.kind === "link-text" || hit.kind === "text")
           ? `<a class="jump" title="打开高亮处理过的页面副本，醒目显示关键词位置" href="/api/locate?url=${encodeURIComponent(page.pageUrl)}&keyword=${encodeURIComponent(hit.keyword)}" target="_blank" rel="noopener">所在页定位</a>`
           : "";
         const jumpTitle = hit.linkHref ? "打开链接指向的目标页" : "打开关键词所在页面";
-        html += `<div class="hit"><span class="badge">${KIND_LABELS[hit.kind] || hit.kind}</span>
+        html += `<div class="hit"><span class="badge">${escapeHtml(KIND_LABELS[hit.kind] || hit.kind)}</span>
           <span class="snippet">${highlight(hit.snippet, data.keywords)}${
           hit.linkHref ? `<br><span class="linkref">链接：<a href="${escapeHtml(hit.linkHref)}" target="_blank" rel="noopener">${escapeHtml(hit.linkHref)}</a></span>` : ""
         }</span><span class="actions"><a class="jump" title="${jumpTitle}" href="${escapeHtml(hit.href)}" target="_blank" rel="noopener">跳转定位</a>${locateOnPage}</span></div>`;
