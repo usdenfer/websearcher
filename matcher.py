@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from datetime import date
 from urllib.parse import quote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Comment
+from discovery.models import Candidate
+from discovery.urltools import normalize_candidate_url
 
 SNIPPET_RADIUS = 60
 
@@ -261,3 +264,116 @@ def match_body_crawl_result(
             "hits": [asdict(hit) for hit in hits],
         })
     return results, total_hits
+
+
+def _published_ordinal(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10]).toordinal()
+    except (TypeError, ValueError):
+        return None
+
+
+def match_body_with_recall(
+    pages,
+    keywords: list[str],
+    candidates: list[Candidate],
+) -> tuple[list[dict], int, int]:
+    """Return strong body matches plus title-only candidate recall.
+
+    The hit count retains the existing body-hit meaning.  Weak count is the
+    number of candidate result rows, not the number of matching title terms.
+    """
+    stable_keywords = list(
+        dict.fromkeys(keyword.strip() for keyword in keywords if keyword.strip())
+    )
+    candidate_by_url: dict[str, tuple[Candidate, int]] = {}
+    for index, candidate in enumerate(candidates):
+        normalized = normalize_candidate_url(candidate.url)
+        if not normalized:
+            continue
+        current = candidate_by_url.get(normalized)
+        if current is None or candidate.score > current[0].score:
+            candidate_by_url[normalized] = (candidate, index)
+
+    ranked_results: list[tuple[dict, Candidate | None, int, str]] = []
+    strong_urls: set[str] = set()
+    strong_hit_count = 0
+    for index, page in enumerate(pages):
+        normalized = normalize_candidate_url(page.url)
+        if normalized in strong_urls:
+            continue
+        hits = match_body_page(page.html, page.url, stable_keywords)
+        if not hits:
+            continue
+        strong_urls.add(normalized)
+        strong_hit_count += len(hits)
+        candidate_entry = candidate_by_url.get(normalized)
+        candidate = candidate_entry[0] if candidate_entry else None
+        ranked_results.append((
+            {
+                "pageUrl": page.url,
+                "pageTitle": extract_title(page.html),
+                "hits": [asdict(hit) for hit in hits],
+                "matchStrength": "strong",
+            },
+            candidate,
+            index,
+            normalized,
+        ))
+
+    weak_result_count = 0
+    page_offset = len(pages)
+    for normalized, (candidate, candidate_index) in candidate_by_url.items():
+        if normalized in strong_urls:
+            continue
+        hits: list[Hit] = []
+        for keyword in stable_keywords:
+            snippet = make_snippet(candidate.title_hint, keyword)
+            if snippet is None:
+                continue
+            hits.append(Hit(
+                kind="title-recall",
+                snippet=snippet,
+                keyword=keyword,
+                href=candidate.url,
+            ))
+        if not hits:
+            continue
+        weak_result_count += 1
+        ranked_results.append((
+            {
+                "pageUrl": candidate.url,
+                "pageTitle": candidate.title_hint,
+                "hits": [asdict(hit) for hit in hits],
+                "matchStrength": "weak",
+            },
+            candidate,
+            page_offset + candidate_index,
+            normalized,
+        ))
+
+    def sort_key(
+        item: tuple[dict, Candidate | None, int, str],
+    ) -> tuple[int, bool, int, int, str, int]:
+        result, candidate, original_index, normalized = item
+        published = _published_ordinal(
+            candidate.published_date if candidate else None
+        )
+        score = candidate.score if candidate else 0
+        return (
+            0 if result["matchStrength"] == "strong" else 1,
+            published is None,
+            -(published or 0),
+            -score,
+            normalized,
+            original_index,
+        )
+
+    ranked_results.sort(key=sort_key)
+    return (
+        [result for result, _candidate, _index, _url in ranked_results],
+        strong_hit_count,
+        weak_result_count,
+    )

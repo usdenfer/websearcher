@@ -1,9 +1,10 @@
 """matcher.py 的单元测试：覆盖全部 kind、大小写、片段、去重。"""
 from types import SimpleNamespace
 
+from discovery.models import Candidate
 from matcher import (SNIPPET_RADIUS, extract_main_text, extract_title,
                     looks_js_driven, make_snippet, match_body_crawl_result,
-                    match_body_page, match_page)
+                    match_body_page, match_body_with_recall, match_page)
 
 PAGE = "http://test.local/page"
 
@@ -273,3 +274,144 @@ def test_match_body_crawl_result_aggregates_only_matching_pages():
     assert [hit["keyword"] for hit in results[1]["hits"]] == [
         "FIRST-8426", "SECOND-9537",
     ]
+
+
+def _candidate(
+    url, title, *, date=None, score=0,
+):
+    return Candidate(
+        url=url,
+        source="freecms-recent",
+        title_hint=title,
+        published_date=date,
+        score=score,
+    )
+
+
+def test_match_body_with_recall_combines_strong_weak_and_ignores_no_match():
+    pages = [SimpleNamespace(
+        url="https://x.test/strong",
+        html="<title>强正文</title><main>正文含 KEY-ONE</main>",
+    )]
+    candidates = [
+        _candidate("https://x.test/strong", "KEY-ONE 标题"),
+        _candidate("https://x.test/fetch-failed", "通知 KEY-ONE"),
+        _candidate("https://x.test/recent-only", "近期通知但标题无关"),
+    ]
+
+    results, strong_hits, weak_results = match_body_with_recall(
+        pages, [" KEY-ONE ", "", "KEY-ONE"], candidates,
+    )
+
+    assert strong_hits == 1
+    assert weak_results == 1
+    assert [item["pageUrl"] for item in results] == [
+        "https://x.test/strong",
+        "https://x.test/fetch-failed",
+    ]
+    assert [item["matchStrength"] for item in results] == [
+        "strong", "weak",
+    ]
+    weak_hit = results[1]["hits"][0]
+    assert weak_hit == {
+        "kind": "title-recall",
+        "snippet": "通知 KEY-ONE",
+        "keyword": "KEY-ONE",
+        "href": "https://x.test/fetch-failed",
+        "linkHref": None,
+    }
+
+
+def test_match_body_with_recall_strong_canonical_url_suppresses_weak():
+    page = SimpleNamespace(
+        url="HTTPS://X.TEST/notice/?utm_source=feed#fragment",
+        html="<main>正文 TARGET</main>",
+    )
+    candidates = [
+        _candidate("https://x.test/notice", "标题 TARGET"),
+        _candidate("https://x.test/notice/", "重复标题 TARGET", score=99),
+    ]
+
+    results, strong_hits, weak_results = match_body_with_recall(
+        [page], ["TARGET"], candidates,
+    )
+
+    assert strong_hits == 1
+    assert weak_results == 0
+    assert len(results) == 1
+    assert results[0]["matchStrength"] == "strong"
+
+
+def test_match_body_with_recall_counts_weak_results_not_title_hits():
+    results, strong_hits, weak_results = match_body_with_recall(
+        [],
+        [" Alpha ", "Beta", "Alpha", ""],
+        [_candidate("https://x.test/two-keywords", "Alpha 与 Beta 通知")],
+    )
+
+    assert strong_hits == 0
+    assert weak_results == 1
+    assert [hit["keyword"] for hit in results[0]["hits"]] == [
+        "Alpha", "Beta",
+    ]
+
+
+def test_match_body_with_recall_sorts_and_hides_ranking_metadata():
+    pages = [
+        SimpleNamespace(
+            url="https://x.test/strong-unknown",
+            html="<main>MATCH unknown</main>",
+        ),
+        SimpleNamespace(
+            url="https://x.test/strong-low",
+            html="<main>MATCH low</main>",
+        ),
+        SimpleNamespace(
+            url="https://x.test/strong-high",
+            html="<main>MATCH high</main>",
+        ),
+    ]
+    candidates = [
+        _candidate(
+            "https://x.test/strong-unknown", "MATCH unknown",
+            date=None, score=999,
+        ),
+        _candidate(
+            "https://x.test/strong-low", "MATCH low",
+            date="2026-07-20", score=10,
+        ),
+        _candidate(
+            "https://x.test/strong-high", "MATCH high",
+            date="2026-07-20", score=80,
+        ),
+        _candidate(
+            "https://x.test/weak-new", "MATCH weak new",
+            date="2026-07-21", score=1,
+        ),
+        _candidate(
+            "https://x.test/weak-old", "MATCH weak old",
+            date="2026-07-19", score=100,
+        ),
+        _candidate(
+            "https://x.test/weak-unknown", "MATCH weak unknown",
+            date=None, score=999,
+        ),
+    ]
+
+    results, strong_hits, weak_results = match_body_with_recall(
+        pages, ["MATCH"], candidates,
+    )
+
+    assert strong_hits == 3
+    assert weak_results == 3
+    assert [item["pageUrl"] for item in results] == [
+        "https://x.test/strong-high",
+        "https://x.test/strong-low",
+        "https://x.test/strong-unknown",
+        "https://x.test/weak-new",
+        "https://x.test/weak-old",
+        "https://x.test/weak-unknown",
+    ]
+    assert all(set(item) == {
+        "pageUrl", "pageTitle", "hits", "matchStrength",
+    } for item in results)

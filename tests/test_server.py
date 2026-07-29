@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import server
 from crawler import CrawledPage, CrawlResult
 from discovery.engine import DiscoveryRun
-from discovery.models import DiscoveryStats
+from discovery.models import Candidate, DiscoveryStats
 from server import app
 
 client = TestClient(app)
@@ -145,6 +145,143 @@ def test_search_matches_keyword_only_in_discovered_body(
     assert any(
         item["pageUrl"].endswith("/opaque-article.html")
         for item in results
+    )
+
+
+def test_freecms_search_exposes_strong_and_unfetched_weak_results(
+        monkeypatch):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url, "<title>正文页</title><main>alpha 正文</main>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(
+                profile="freecms",
+                candidates_found=1,
+                candidates_fetched=0,
+            ),
+            candidates=[
+                Candidate(
+                    "https://freecms.test/strong",
+                    "freecms-recent",
+                    title_hint="alpha 强标题",
+                ),
+                Candidate(
+                    "https://freecms.test/unfetched",
+                    "freecms-recent",
+                    title_hint="alpha 弱标题",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    response = client.post("/api/search", json={
+        "startUrl": "https://freecms.test/strong",
+        "keywords": ["alpha"],
+        "render": "off",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["totalHits"] == 1
+    assert data["weakHits"] == 1
+    assert [item["matchStrength"] for item in data["results"]] == [
+        "strong", "weak",
+    ]
+    assert data["results"][1]["hits"][0]["kind"] == "title-recall"
+    assert data["discovery"]["weakCandidates"] == 1
+    assert data["pagesCrawled"] == 1
+    assert data["crawledPages"] == ["https://freecms.test/strong"]
+
+
+def test_freecms_search_can_return_only_weak_results(monkeypatch):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url, "<main>正文没有命中</main>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="freecms"),
+            candidates=[
+                Candidate(
+                    "https://freecms.test/weak-only",
+                    "freecms-recent",
+                    title_hint="alpha 弱标题",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    response = client.post("/api/search", json={
+        "startUrl": "https://freecms.test/start",
+        "keywords": ["alpha"],
+        "render": "off",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["totalHits"] == 0
+    assert data["weakHits"] == 1
+    assert len(data["results"]) == 1
+    assert data["results"][0]["matchStrength"] == "weak"
+
+
+def test_generic_search_marks_results_strong_and_has_no_weak_hits(
+        monkeypatch):
+    async def fake_expand(keywords, host):
+        return []
+
+    async def fake_crawl(url, **kwargs):
+        return CrawlResult(pages=[
+            CrawledPage(url, "<main>alpha 正文</main>")
+        ])
+
+    async def fake_discover(*args, **kwargs):
+        return DiscoveryRun(
+            pages=[],
+            failed=[],
+            stats=DiscoveryStats(profile="generic"),
+            candidates=[
+                Candidate(
+                    "https://generic.test/not-used",
+                    "sitemap",
+                    title_hint="alpha 标题",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(server, "expand_keywords", fake_expand)
+    monkeypatch.setattr(server, "crawl", fake_crawl)
+    monkeypatch.setattr(server, "discover_pages", fake_discover)
+    response = client.post("/api/search", json={
+        "startUrl": "https://generic.test/start",
+        "keywords": ["alpha"],
+        "render": "off",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["weakHits"] == 0
+    assert all(
+        item["matchStrength"] == "strong"
+        for item in data["results"]
     )
 
 

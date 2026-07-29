@@ -41,6 +41,7 @@ from matcher import (
     extract_main_text,
     looks_js_driven,
     match_body_crawl_result,
+    match_body_with_recall,
 )
 
 SEARCH_BUDGET_SECONDS = 120
@@ -235,7 +236,18 @@ async def search(req: SearchRequest) -> dict:
     crawl_result.pages.extend(discovery_run.pages)
     crawl_result.failed.extend(discovery_run.failed)
 
-    results, total_hits = _match_crawl(crawl_result, all_keywords)
+    if discovery_run.stats.profile == "freecms":
+        results, total_hits, weak_hits = match_body_with_recall(
+            crawl_result.pages,
+            all_keywords,
+            discovery_run.candidates,
+        )
+    else:
+        results, total_hits = _match_crawl(crawl_result, all_keywords)
+        for result in results:
+            result["matchStrength"] = "strong"
+        weak_hits = 0
+    discovery_run.stats.weak_candidates = weak_hits
     response = {
         "startUrl": req.startUrl,
         "keywords": req.keywords,
@@ -258,6 +270,7 @@ async def search(req: SearchRequest) -> dict:
         "crawledPages": [p.url for p in crawl_result.pages],
         "pagesFailed": crawl_result.failed,
         "totalHits": total_hits,
+        "weakHits": weak_hits,
         "results": results,
     }
     texts = {
