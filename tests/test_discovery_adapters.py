@@ -145,6 +145,36 @@ def test_freecms_adapter_exposes_api_search_and_fallback_categories():
     ]
 
 
+def test_zycg_freecms_adapter_exposes_recent_notice_contract():
+    spec = FreeCmsAdapter(
+        "https://www.zycg.gov.cn/"
+    ).recent_notice_spec()
+
+    assert spec is not None
+    assert spec.url == (
+        "https://www.zycg.gov.cn/freecms/rest/v1/notice/"
+        "selectInfoMore.do"
+    )
+    assert spec.params_for("", page=2) == {
+        "siteId": "6f5243ee-d4d9-4b69-abbd-1e40576ccd7d",
+        "channel": "d0e7c5f4-b93e-4478-b7fe-61110bb47fd5",
+        "pageSize": "15",
+        "implementWay": "1",
+        "noticeType": "1,2,3,31,32,52,57,61",
+        "title": "",
+        "currPage": 2,
+    }
+
+
+def test_non_zycg_freecms_adapter_has_no_recent_notice_contract():
+    assert (
+        FreeCmsAdapter(
+            "https://procurement.example.test/"
+        ).recent_notice_spec()
+        is None
+    )
+
+
 def test_freecms_is_selected_by_domain_or_homepage_marker():
     assert isinstance(
         select_adapter("https://sub.zycg.gov.cn/", ""),
@@ -218,6 +248,64 @@ def test_freecms_invalid_json_is_reported_in_chinese():
     assert ok is False
     assert rows == []
     assert warning == "FreeCMS 搜索接口返回了无效 JSON"
+
+
+@pytest.mark.parametrize("code", [0, "200"])
+def test_freecms_recent_response_accepts_codes_and_normalizes_page_url(code):
+    body = (
+        '{"code": %s, "data": ['
+        '{"pageurl": "/notice/lower", "title": "标题一", '
+        '"addtimeStr": "2026-07-28"}, '
+        '{"pageUrl": "/notice/canonical", "pageURL": "/notice/upper", '
+        '"pageurl": "/notice/lower-ignored", "title": "标题二"}, '
+        '{"pageURL": "/notice/upper-only", "title": "标题三"}'
+        "]}"
+    ) % (code if isinstance(code, int) else f'"{code}"')
+
+    ok, rows, warning = FreeCmsAdapter(
+        "https://www.zycg.gov.cn/"
+    ).parse_recent_response(body)
+
+    assert ok is True
+    assert rows == [
+        {
+            "pageUrl": "/notice/lower",
+            "title": "标题一",
+            "addtimeStr": "2026-07-28",
+        },
+        {
+            "pageUrl": "/notice/canonical",
+            "title": "标题二",
+        },
+        {
+            "pageUrl": "/notice/upper-only",
+            "title": "标题三",
+        },
+    ]
+    assert warning == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "{not-json",
+        "[]",
+        '{"code": 500, "msg": "数据库 password=secret"}',
+        '{"code": 0, "data": {"rows": []}}',
+        '{"code": 0, "data": [1]}',
+    ],
+)
+def test_freecms_recent_response_rejects_invalid_or_failed_payloads(body):
+    ok, rows, warning = FreeCmsAdapter(
+        "https://www.zycg.gov.cn/"
+    ).parse_recent_response(body)
+
+    assert ok is False
+    assert rows == []
+    assert warning
+    assert any("\u4e00" <= char <= "\u9fff" for char in warning)
+    assert "secret" not in warning
+    assert "password" not in warning
 
 
 def test_yunnan_adapter_remains_available_with_expected_search_parameters():

@@ -103,6 +103,25 @@ class FreeCmsAdapter(SiteAdapter):
             )
         ]
 
+    def recent_notice_spec(self) -> SearchSpec | None:
+        host = urlsplit(self.origin).hostname or ""
+        if host != "zycg.gov.cn" and not host.endswith(".zycg.gov.cn"):
+            return None
+        return SearchSpec(
+            "recent-notice-api",
+            self.origin
+            + "/freecms/rest/v1/notice/selectInfoMore.do",
+            "title",
+            "currPage",
+            (
+                ("siteId", "6f5243ee-d4d9-4b69-abbd-1e40576ccd7d"),
+                ("channel", "d0e7c5f4-b93e-4478-b7fe-61110bb47fd5"),
+                ("pageSize", "15"),
+                ("implementWay", "1"),
+                ("noticeType", "1,2,3,31,32,52,57,61"),
+            ),
+        )
+
     def category_urls(self) -> list[str]:
         base = self.origin + "/freecms/site/zygjjgzfcgzx/"
         return [
@@ -135,6 +154,40 @@ class FreeCmsAdapter(SiteAdapter):
         ):
             return False, [], "FreeCMS 搜索接口数据结构无效"
         return True, list(rows), ""
+
+    def parse_recent_response(
+        self,
+        body: str,
+    ) -> tuple[bool, list[dict], str]:
+        try:
+            response = json.loads(body)
+        except (json.JSONDecodeError, TypeError, UnicodeError):
+            return False, [], "FreeCMS 最近公告接口返回了无效 JSON"
+        if not isinstance(response, dict):
+            return False, [], "FreeCMS 最近公告接口业务失败"
+        if str(response.get("code")) not in {"0", "200"}:
+            return False, [], "FreeCMS 最近公告接口业务失败"
+        rows = response.get("data")
+        if (
+            not isinstance(rows, list)
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            return False, [], "FreeCMS 最近公告接口数据结构无效"
+
+        normalized_rows = []
+        for row in rows:
+            normalized = dict(row)
+            page_url = normalized.get("pageUrl")
+            if page_url is None:
+                page_url = normalized.get("pageURL")
+            if page_url is None:
+                page_url = normalized.get("pageurl")
+            normalized.pop("pageURL", None)
+            normalized.pop("pageurl", None)
+            if page_url is not None:
+                normalized["pageUrl"] = page_url
+            normalized_rows.append(normalized)
+        return True, normalized_rows, ""
 
 
 class YunnanCmsAdapter(SiteAdapter):
