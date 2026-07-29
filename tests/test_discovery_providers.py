@@ -805,6 +805,8 @@ def test_freecms_business_failure_is_not_success_and_later_keyword_continues():
             requested_keywords.append(keyword)
             if keyword == "bad":
                 body = {"code": 500, "msg": "business rejected"}
+            elif request.url.params["currPage"] != "1":
+                body = {"code": 200, "data": {"rows": []}}
             else:
                 body = {
                     "code": 200,
@@ -834,12 +836,279 @@ def test_freecms_business_failure_is_not_success_and_later_keyword_continues():
                 client, BudgetManager(), stats, POLICY, adapter
             ).discover(["bad", "good"])
 
-        assert requested_keywords == ["bad", "good"]
+        assert requested_keywords == ["bad", "good", "good"]
         assert [item.url for item in result] == [
             "https://x.test/notice/view?id=42&kind=x"
         ]
         assert stats.sources_succeeded == {"site-search-api"}
         assert stats.warnings == ["site-search-api: business rejected"]
+
+    asyncio.run(run())
+
+
+def test_freecms_keyword_search_paginates_to_recent_date_boundary():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            page = int(request.url.params["currPage"])
+            requested_pages.append(page)
+            rows = {
+                1: [
+                    {
+                        "pageUrl": "/notice/recent",
+                        "id": "20",
+                        "title": "alpha recent",
+                        "addtimeStr": "2026-07-20 08:00:00",
+                    }
+                ],
+                2: [
+                    {
+                        "pageUrl": "/notice/old",
+                        "id": "28",
+                        "title": "alpha old",
+                        "addtimeStr": "2026-06-28 08:00:00",
+                    }
+                ],
+            }[page]
+            return httpx.Response(
+                200,
+                text=json.dumps({"code": 200, "data": {"rows": rows}}),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover(["alpha"])
+
+        assert requested_pages == [1, 2]
+        assert [item.url for item in result] == [
+            "https://x.test/notice/recent?id=20"
+        ]
+        assert result[0].published_date == "2026-07-20"
+        assert result[0].source_evidence == ("site-search-api",)
+
+    asyncio.run(run())
+
+
+def test_freecms_keyword_search_keeps_unknown_date_until_empty_page():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            page = int(request.url.params["currPage"])
+            requested_pages.append(page)
+            rows = (
+                [
+                    {
+                        "pageUrl": "/notice/unknown",
+                        "title": "alpha unknown",
+                        "addtimeStr": "invalid",
+                    }
+                ]
+                if page == 1
+                else []
+            )
+            return httpx.Response(
+                200,
+                text=json.dumps({"code": 200, "data": {"rows": rows}}),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover(["alpha"])
+
+        assert requested_pages == [1, 2]
+        assert [item.published_date for item in result] == [None]
+        assert stats.unknown_date_candidates == 1
+
+    asyncio.run(run())
+
+
+def test_freecms_keywords_have_independent_pagination_and_fixed_params():
+    async def run():
+        api_requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            api_requests.append(request)
+            keyword = request.url.params["title"]
+            page = request.url.params["currPage"]
+            rows = (
+                [
+                    {
+                        "pageUrl": f"/notice/{keyword}-{page}",
+                        "title": keyword,
+                    }
+                ]
+                if keyword == "first" or page == "1"
+                else []
+            )
+            return httpx.Response(
+                200,
+                text=json.dumps({"code": 200, "data": {"rows": rows}}),
+            )
+
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                DiscoveryStats(),
+                POLICY,
+                adapter,
+                today=date(2026, 7, 29),
+                max_pages_per_keyword=2,
+            ).discover(["first", "second"])
+
+        assert [
+            (request.url.params["title"], request.url.params["currPage"])
+            for request in api_requests
+        ] == [
+            ("first", "1"),
+            ("first", "2"),
+            ("second", "1"),
+            ("second", "2"),
+        ]
+        assert all(
+            request.url.params["pageSize"] == "10"
+            for request in api_requests
+        )
+        assert len(result) == 3
+
+    asyncio.run(run())
+
+
+def test_freecms_cutoff_is_inclusive_and_disorder_disables_early_stop():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            page = int(request.url.params["currPage"])
+            requested_pages.append(page)
+            rows = {
+                1: [
+                    {
+                        "pageUrl": "/notice/old",
+                        "addtimeStr": "2026-06-28",
+                    },
+                    {
+                        "pageUrl": "/notice/cutoff",
+                        "addtimeStr": "2026-06-29",
+                    },
+                ],
+                2: [
+                    {
+                        "pageUrl": "/notice/new",
+                        "addtimeStr": "2026-07-10",
+                    }
+                ],
+                3: [],
+            }[page]
+            return httpx.Response(
+                200,
+                text=json.dumps({"code": 200, "data": {"rows": rows}}),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+                today=date(2026, 7, 29),
+            ).discover(["alpha"])
+
+        assert requested_pages == [1, 2, 3]
+        assert [item.url for item in result] == [
+            "https://x.test/notice/cutoff",
+            "https://x.test/notice/new",
+        ]
+        assert [item.published_date for item in result] == [
+            "2026-06-29",
+            "2026-07-10",
+        ]
+
+    asyncio.run(run())
+
+
+def test_freecms_nonempty_keyword_page_limit_notes_stop():
+    async def run():
+        requested_pages: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/searchAll.do"):
+                return httpx.Response(200, text="<html></html>")
+            page = int(request.url.params["currPage"])
+            requested_pages.append(page)
+            return httpx.Response(
+                200,
+                text=json.dumps(
+                    {
+                        "code": 200,
+                        "data": {
+                            "rows": [
+                                {
+                                    "pageUrl": f"/notice/{page}",
+                                    "addtimeStr": "2026-07-20",
+                                }
+                            ]
+                        },
+                    }
+                ),
+            )
+
+        stats = DiscoveryStats()
+        adapter = FreeCmsAdapter("https://x.test/start")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            result = await FreeCmsApiProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                adapter,
+                today=date(2026, 7, 29),
+                max_pages_per_keyword=2,
+            ).discover(["alpha"])
+
+        assert len(result) == 2
+        assert requested_pages == [1, 2]
+        assert stats.stop_reason == "provider-page-limit"
 
     asyncio.run(run())
 

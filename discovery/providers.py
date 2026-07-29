@@ -511,9 +511,14 @@ class FreeCmsApiProvider(Provider):
         stats: DiscoveryStats,
         policy: DomainPolicy,
         adapter: FreeCmsAdapter,
+        *,
+        today: date | None = None,
+        max_pages_per_keyword: int = 10,
     ):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
+        self.today = today or date.today()
+        self.max_pages_per_keyword = max_pages_per_keyword
 
     async def _warm_session(self) -> None:
         await _warm_freecms_session(
@@ -530,64 +535,131 @@ class FreeCmsApiProvider(Provider):
         source_was_successful = self.source in self.stats.sources_succeeded
         business_success = False
         spec = self.adapter.search_specs()[0]
+        selected_keywords = keywords[:6]
+        request_limit = (
+            len(selected_keywords) * self.max_pages_per_keyword
+        )
+        cutoff = self.today - timedelta(days=30)
         await self._warm_session()
-        for keyword in keywords[:6]:
-            loaded = await self.get_text(
-                spec.url,
-                limit=10,
-                params=spec.params_for(keyword),
-                counts_as_html=False,
-            )
-            if loaded is None:
-                continue
-            body, _final_url = loaded
-            ok, rows, warning = self.adapter.parse_api_response(body)
-            if not ok:
-                self.stats.warnings.append(f"{self.source}: {warning}")
-                continue
-            business_success = True
-            for row in rows:
-                raw = str(row.get("pageUrl") or "")
-                if not raw:
-                    continue
-                candidate_url = urljoin(self.adapter.origin + "/", raw)
-                item_id = row.get("id")
-                query_keys = {
-                    key
-                    for key, _value in parse_qsl(
-                        urlsplit(candidate_url).query,
-                        keep_blank_values=True,
-                    )
-                }
-                if item_id and "id" not in query_keys:
-                    parts = urlsplit(candidate_url)
-                    query = parse_qsl(
-                        parts.query, keep_blank_values=True
-                    )
-                    query.append(("id", str(item_id)))
-                    candidate_url = urlunsplit(
-                        parts._replace(query=urlencode(query, doseq=True))
-                    )
-                candidate_url = normalize_candidate_url(candidate_url)
-                if (
-                    not candidate_url
-                    or candidate_url in seen
-                    or not url_allowed(candidate_url, self.policy)
-                ):
-                    continue
-                seen.add(candidate_url)
-                title = str(row.get("title") or "")
-                result.append(
-                    Candidate(
-                        candidate_url,
-                        self.source,
-                        keyword,
-                        title,
-                        100
-                        if keyword.lower() in title.lower()
-                        else 75,
-                    )
+        if self.budget.expired():
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+
+        for keyword in selected_keywords:
+            dates_nonincreasing = True
+            last_valid_date: date | None = None
+            for page in range(1, self.max_pages_per_keyword + 1):
+                if self.budget.expired():
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                    break
+                loaded = await self.get_text(
+                    spec.url,
+                    limit=request_limit,
+                    params=spec.params_for(keyword, page),
+                    counts_as_html=False,
                 )
+                if loaded is None:
+                    if self.budget.expired():
+                        self.stats.partial = True
+                        self.stats.note_stop("time-budget")
+                    break
+                body, _final_url = loaded
+                ok, rows, warning = self.adapter.parse_api_response(body)
+                if not ok:
+                    self.stats.warnings.append(
+                        f"{self.source}: {warning}"
+                    )
+                    break
+                business_success = True
+                if not rows:
+                    break
+
+                parsed_rows: list[tuple[dict, date | None]] = []
+                page_has_expired_date = False
+                for row in rows:
+                    raw_date = row.get("addtimeStr")
+                    published: date | None = None
+                    if raw_date is not None:
+                        try:
+                            published = date.fromisoformat(
+                                str(raw_date)[:10]
+                            )
+                        except ValueError:
+                            pass
+                    parsed_rows.append((row, published))
+                    if published is not None:
+                        if (
+                            last_valid_date is not None
+                            and published > last_valid_date
+                        ):
+                            dates_nonincreasing = False
+                        last_valid_date = published
+                        if published < cutoff:
+                            page_has_expired_date = True
+
+                for row, published in parsed_rows:
+                    if published is not None and published < cutoff:
+                        continue
+                    raw = str(row.get("pageUrl") or "")
+                    if not raw:
+                        continue
+                    candidate_url = urljoin(
+                        self.adapter.origin + "/", raw
+                    )
+                    item_id = row.get("id")
+                    query_keys = {
+                        key
+                        for key, _value in parse_qsl(
+                            urlsplit(candidate_url).query,
+                            keep_blank_values=True,
+                        )
+                    }
+                    if item_id and "id" not in query_keys:
+                        parts = urlsplit(candidate_url)
+                        query = parse_qsl(
+                            parts.query, keep_blank_values=True
+                        )
+                        query.append(("id", str(item_id)))
+                        candidate_url = urlunsplit(
+                            parts._replace(
+                                query=urlencode(query, doseq=True)
+                            )
+                        )
+                    candidate_url = normalize_candidate_url(candidate_url)
+                    if (
+                        not candidate_url
+                        or candidate_url in seen
+                        or not url_allowed(candidate_url, self.policy)
+                    ):
+                        continue
+                    seen.add(candidate_url)
+                    if published is None:
+                        self.stats.unknown_date_candidates += 1
+                    title = str(row.get("title") or "")
+                    result.append(
+                        Candidate(
+                            candidate_url,
+                            self.source,
+                            keyword,
+                            title,
+                            100
+                            if keyword.lower() in title.lower()
+                            else 75,
+                            published_date=(
+                                published.isoformat()
+                                if published is not None
+                                else None
+                            ),
+                            source_evidence=(self.source,),
+                        )
+                    )
+
+                if page == self.max_pages_per_keyword:
+                    self.stats.note_stop("provider-page-limit")
+                if dates_nonincreasing and page_has_expired_date:
+                    self.stats.note_stop("date-boundary")
+                    break
         if source_was_successful or business_success:
             self.stats.sources_succeeded.add(self.source)
         else:
