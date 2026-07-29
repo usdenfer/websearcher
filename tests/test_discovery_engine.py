@@ -76,7 +76,11 @@ def test_merge_preserves_best_metadata_and_combines_recall_evidence():
         requires_render=True,
         section="recent",
         published_date="2026-07-20",
-        source_evidence=("freecms-recent",),
+        source_evidence=(
+            "adapter-hint",
+            "freecms-recent",
+            "adapter-hint",
+        ),
     )
     search = Candidate(
         "https://x.test/news/1",
@@ -86,6 +90,11 @@ def test_merge_preserves_best_metadata_and_combines_recall_evidence():
         score=100,
         requires_render=False,
         section="search",
+        source_evidence=(
+            "site-search-api",
+            "search-form",
+            "search-form",
+        ),
     )
 
     merged = merge_candidates([recent, search])
@@ -99,7 +108,9 @@ def test_merge_preserves_best_metadata_and_combines_recall_evidence():
     assert merged[0].section == "search"
     assert merged[0].published_date == "2026-07-20"
     assert merged[0].source_evidence == (
+        "adapter-hint",
         "freecms-recent",
+        "search-form",
         "site-search-api",
     )
 

@@ -95,6 +95,9 @@ def test_discovery_stats_defaults_to_generic_profile():
 
     assert stats.profile == "generic"
     assert stats.recent_window_days is None
+    assert stats.weak_candidates == 0
+    assert stats.unknown_date_candidates == 0
+    assert stats.stop_reason is None
 
 
 def test_discovery_stats_as_dict_exposes_stable_api_shape():
@@ -134,20 +137,29 @@ def test_discovery_stats_as_dict_exposes_stable_api_shape():
 
 
 def test_discovery_stats_note_stop_keeps_highest_priority_reason():
-    stats = DiscoveryStats()
+    ordered_reasons = (
+        "date-boundary",
+        "provider-page-limit",
+        "channel-failure",
+        "html-page-budget",
+        "time-budget",
+    )
 
-    stats.note_stop("unknown-reason")
-    assert stats.stop_reason is None
+    for higher_index, higher in enumerate(ordered_reasons[1:], start=1):
+        for lower in ordered_reasons[:higher_index]:
+            higher_first = DiscoveryStats()
+            higher_first.note_stop(higher)
+            higher_first.note_stop(lower)
+            assert higher_first.stop_reason == higher
 
-    stats.note_stop("date-boundary")
-    stats.note_stop("provider-page-limit")
-    stats.note_stop("channel-failure")
-    stats.note_stop("html-page-budget")
-    stats.note_stop("time-budget")
-    stats.note_stop("another-unknown-reason")
-    stats.note_stop("date-boundary")
+            lower_first = DiscoveryStats()
+            lower_first.note_stop(lower)
+            lower_first.note_stop(higher)
+            assert lower_first.stop_reason == higher
 
-    assert stats.stop_reason == "time-budget"
+    unknown = DiscoveryStats()
+    unknown.note_stop("unknown-reason")
+    assert unknown.stop_reason is None
 
 
 def test_search_spec_params_merge_fixed_keyword_and_first_page():
