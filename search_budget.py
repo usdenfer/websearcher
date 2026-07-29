@@ -11,12 +11,12 @@ BASE_BFS_PAGE_BUDGET = 30
 
 
 def _normalize_dns_hostname(hostname: str) -> str | None:
-    if hostname.endswith("."):
-        hostname = hostname[:-1]
     try:
         normalized = hostname.encode("idna").decode("ascii").lower()
     except (UnicodeError, ValueError):
         return None
+    if normalized.endswith("."):
+        normalized = normalized[:-1]
     if len(normalized) > 253:
         return None
     labels = normalized.split(".")

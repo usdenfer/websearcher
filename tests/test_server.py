@@ -29,6 +29,8 @@ def search(site_server, keywords, path="/index.html"):
         "https://www.zycg.gov.cn/search",
         "https://www.zycg.gov.cn./",
         "https://www.zycg.gov.cn.:8443/search",
+        "https://zycg.gov.cn。/",
+        "https://zycg。gov。cn。/",
     ],
 )
 def test_search_budget_expands_for_zycg_hosts(start_url):
@@ -63,6 +65,7 @@ def test_normalize_dns_hostname_handles_ascii_and_idna():
         "https://bad-.zycg.gov.cn/",
         "https://.zycg.gov.cn/",
         "https://www.zycg.gov.cn../",
+        "https://www.zycg.gov.cn。。/",
         f"https://{'a' * 64}.zycg.gov.cn/",
         (
             "https://"
