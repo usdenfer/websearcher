@@ -66,6 +66,44 @@ def test_merge_skips_invalid_normalized_urls():
     ) == [Candidate("https://x.test/good", "sitemap", score=55)]
 
 
+def test_merge_preserves_best_metadata_and_combines_recall_evidence():
+    recent = Candidate(
+        "https://x.test/news/1",
+        "freecms-recent",
+        keyword="recent-keyword",
+        title_hint="recent title",
+        score=75,
+        requires_render=True,
+        section="recent",
+        published_date="2026-07-20",
+        source_evidence=("freecms-recent",),
+    )
+    search = Candidate(
+        "https://x.test/news/1",
+        "site-search-api",
+        keyword="search-keyword",
+        title_hint="search title",
+        score=100,
+        requires_render=False,
+        section="search",
+    )
+
+    merged = merge_candidates([recent, search])
+
+    assert len(merged) == 1
+    assert merged[0].source == "site-search-api"
+    assert merged[0].keyword == "search-keyword"
+    assert merged[0].title_hint == "search title"
+    assert merged[0].score == 100
+    assert merged[0].requires_render is False
+    assert merged[0].section == "search"
+    assert merged[0].published_date == "2026-07-20"
+    assert merged[0].source_evidence == (
+        "freecms-recent",
+        "site-search-api",
+    )
+
+
 def test_rank_prioritizes_score_and_enforces_source_and_section_limits():
     items = [
         Candidate(

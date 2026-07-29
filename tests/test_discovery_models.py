@@ -13,16 +13,22 @@ def test_candidate_identity_is_url_across_sources():
         source="site_search",
         keyword="alpha",
         score=10,
+        published_date="2026-07-20",
+        source_evidence=("site-search-api",),
     )
     sitemap_candidate = Candidate(
         url="https://example.com/news/1",
         source="sitemap",
         keyword="beta",
         score=80,
+        published_date=None,
+        source_evidence=("freecms-recent",),
     )
 
     assert search_candidate == sitemap_candidate
     assert len({search_candidate, sitemap_candidate}) == 1
+    assert search_candidate.published_date == "2026-07-20"
+    assert search_candidate.source_evidence == ("site-search-api",)
 
 
 def test_domain_policy_allows_only_explicit_non_excluded_hosts():
@@ -85,7 +91,10 @@ def test_budget_exposes_non_negative_remaining_deadline(monkeypatch):
 
 
 def test_discovery_stats_defaults_to_generic_profile():
-    assert DiscoveryStats().profile == "generic"
+    stats = DiscoveryStats()
+
+    assert stats.profile == "generic"
+    assert stats.recent_window_days is None
 
 
 def test_discovery_stats_as_dict_exposes_stable_api_shape():
@@ -100,6 +109,10 @@ def test_discovery_stats_as_dict_exposes_stable_api_shape():
         partial=True,
         elapsed_ms=2345,
         warnings=["provider unavailable"],
+        recent_window_days=30,
+        weak_candidates=4,
+        unknown_date_candidates=3,
+        stop_reason="date-boundary",
     )
 
     assert stats.as_dict() == {
@@ -113,7 +126,28 @@ def test_discovery_stats_as_dict_exposes_stable_api_shape():
         "partial": True,
         "elapsedMs": 2345,
         "warnings": ["provider unavailable"],
+        "recentWindowDays": 30,
+        "weakCandidates": 4,
+        "unknownDateCandidates": 3,
+        "stopReason": "date-boundary",
     }
+
+
+def test_discovery_stats_note_stop_keeps_highest_priority_reason():
+    stats = DiscoveryStats()
+
+    stats.note_stop("unknown-reason")
+    assert stats.stop_reason is None
+
+    stats.note_stop("date-boundary")
+    stats.note_stop("provider-page-limit")
+    stats.note_stop("channel-failure")
+    stats.note_stop("html-page-budget")
+    stats.note_stop("time-budget")
+    stats.note_stop("another-unknown-reason")
+    stats.note_stop("date-boundary")
+
+    assert stats.stop_reason == "time-budget"
 
 
 def test_search_spec_params_merge_fixed_keyword_and_first_page():

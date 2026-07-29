@@ -4,6 +4,16 @@ import time
 from dataclasses import dataclass, field
 
 
+_STOP_REASON_PRIORITY = {
+    None: 0,
+    "date-boundary": 10,
+    "provider-page-limit": 20,
+    "channel-failure": 30,
+    "html-page-budget": 40,
+    "time-budget": 50,
+}
+
+
 @dataclass(frozen=True)
 class Candidate:
     url: str
@@ -13,6 +23,10 @@ class Candidate:
     score: int = field(default=0, compare=False)
     requires_render: bool = field(default=False, compare=False)
     section: str = field(default="", compare=False)
+    published_date: str | None = field(default=None, compare=False)
+    source_evidence: tuple[str, ...] = field(
+        default=(), compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -58,6 +72,18 @@ class DiscoveryStats:
     partial: bool = False
     elapsed_ms: int = 0
     warnings: list[str] = field(default_factory=list)
+    recent_window_days: int | None = None
+    weak_candidates: int = 0
+    unknown_date_candidates: int = 0
+    stop_reason: str | None = None
+
+    def note_stop(self, reason: str) -> None:
+        current_priority = _STOP_REASON_PRIORITY.get(
+            self.stop_reason, 0
+        )
+        reason_priority = _STOP_REASON_PRIORITY.get(reason, 0)
+        if reason_priority > current_priority:
+            self.stop_reason = reason
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -71,6 +97,10 @@ class DiscoveryStats:
             "partial": self.partial,
             "elapsedMs": self.elapsed_ms,
             "warnings": list(self.warnings),
+            "recentWindowDays": self.recent_window_days,
+            "weakCandidates": self.weak_candidates,
+            "unknownDateCandidates": self.unknown_date_candidates,
+            "stopReason": self.stop_reason,
         }
 
 

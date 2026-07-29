@@ -54,16 +54,31 @@ def merge_candidates(items: list[Candidate]) -> list[Candidate]:
         ):
             continue
         current = best.get(normalized)
-        if current is not None and current.score >= item.score:
-            continue
+        evidence = {
+            item.source,
+            *item.source_evidence,
+        }
+        if current is not None:
+            evidence.update(current.source_evidence)
+            selected = item if item.score > current.score else current
+            published_date = (
+                selected.published_date
+                or current.published_date
+                or item.published_date
+            )
+        else:
+            selected = item
+            published_date = item.published_date
         best[normalized] = Candidate(
             normalized,
-            item.source,
-            item.keyword,
-            item.title_hint,
-            item.score,
-            item.requires_render,
-            item.section,
+            selected.source,
+            selected.keyword,
+            selected.title_hint,
+            selected.score,
+            selected.requires_render,
+            selected.section,
+            published_date,
+            tuple(sorted(evidence)),
         )
     return list(best.values())
 
