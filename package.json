@@ -4,6 +4,6 @@
   "private": true,
   "description": "站内关键词搜索工具（FastAPI + 原生前端）",
   "scripts": {
-    "dev": "node scripts/dev.mjs"
+    "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
   }
 }
