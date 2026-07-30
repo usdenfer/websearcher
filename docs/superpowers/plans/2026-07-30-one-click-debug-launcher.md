@@ -65,8 +65,8 @@ Assert-True (Test-Path -LiteralPath $batchPath) "Batch launcher exists"
 $package = Get-Content -Raw -Encoding UTF8 $packagePath | ConvertFrom-Json
 Assert-True (
     $package.scripts.dev -eq
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
-) "npm run dev uses the shared PowerShell launcher"
+        '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1'
+) "npm run dev uses the absolute shared PowerShell launcher"
 
 $batch = Get-Content -Raw -Encoding ASCII $batchPath
 Assert-True (
@@ -326,11 +326,17 @@ Replace `start_debug.bat` with:
 @echo off
 setlocal
 cd /d "%~dp0"
+set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+if not exist "%POWERSHELL_EXE%" (
+    echo Windows PowerShell was not found at "%POWERSHELL_EXE%".
+    exit /b 1
+)
 
 if "%~1"=="" (
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\start-debug.ps1"
+    "%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "scripts\start-debug.ps1"
 ) else (
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\start-debug.ps1" -Port "%~1"
+    "%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "scripts\start-debug.ps1" -Port "%~1"
 )
 
 set "EXIT_CODE=%ERRORLEVEL%"
@@ -348,7 +354,7 @@ Change `package.json` scripts to:
 
 ```json
 "scripts": {
-  "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
+  "dev": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
 }
 ```
 
