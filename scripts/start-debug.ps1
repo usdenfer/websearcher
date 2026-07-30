@@ -124,7 +124,18 @@ try {
     if ($serverProcess -and -not $serverProcess.HasExited) {
         try {
             & "$env:SystemRoot\System32\taskkill.exe" /PID $serverProcess.Id /T /F *> $null
+            $cleanupExitCode = $LASTEXITCODE
+            $null = $serverProcess.WaitForExit(1000)
+            $serverProcess.Refresh()
+
+            if ($cleanupExitCode -ne 0) {
+                Write-Warning "Cleanup taskkill failed for server process $($serverProcess.Id) with exit code $cleanupExitCode."
+            }
+            if (-not $serverProcess.HasExited) {
+                Write-Warning "Cleanup could not stop server process $($serverProcess.Id); it may still be running."
+            }
         } catch {
+            Write-Warning "Cleanup could not stop server process $($serverProcess.Id): $($_.Exception.Message)"
         }
     }
 }
