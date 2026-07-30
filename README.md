@@ -57,16 +57,27 @@ npm run dev
 # 默认 http://127.0.0.1:7100
 ```
 
-`npm run dev` 是默认的一键启动方式。在 PowerShell 或 IDE 中需要指定任意
-启动参数时，请显式使用 `npm.cmd`，例如：
+`npm run dev` 是默认的一键启动方式；它默认在 `http://127.0.0.1:7100`
+启动并打开浏览器。Windows 启动器会先结束所选目标端口上正在监听的进程树，
+再以 `--no-reload` 单进程模式启动服务、等待就绪并打开浏览器，从而避免
+uvicorn reload worker 残留。
+
+也可以在资源管理器中双击 `start_debug.bat` 启动。要指定端口，请使用：
+
+```text
+start_debug.bat 7200
+```
+
+在 PowerShell 或 IDE 中使用自定义选项时，请显式使用 `npm.cmd`，不要使用
+`npm.ps1`；后者会剥离 PowerShell 风格的命名参数。安全的写法包括：
 
 ```powershell
-npm.cmd run dev -- -Port 7200 -NoBrowser
+npm.cmd run dev -- -Port 7200
+npm.cmd run dev -- -NoBrowser
 npm.cmd run dev -- -Host 0.0.0.0 -Port 7200
 ```
 
-PowerShell 会将 `npm` 解析为 `npm.ps1`，它会剥离 PowerShell 风格的参数名；
-因此带命名启动参数时必须使用 `npm.cmd`。
+启动器只会终止所选目标端口的监听进程，不会影响其他 Python 或 Node 服务。
 
 不配置 AI key 时，正文搜索仍可正常使用，AI 功能会降级。
 
