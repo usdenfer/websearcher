@@ -449,78 +449,184 @@ foreach ($invalidHostName in @(
     ) "readiness refuses a reused server root identity"
 }
 
-$earlyExitProcess = $null
-$earlyExitSuffix = "$EarlyExitPort-$([Guid]::NewGuid().ToString('N'))"
-$earlyExitStdoutPath = Join-Path `
-    $env:TEMP `
-    "web-keyword-early-exit-$earlyExitSuffix.stdout.log"
-$earlyExitStderrPath = Join-Path `
-    $env:TEMP `
-    "web-keyword-early-exit-$earlyExitSuffix.stderr.log"
-try {
-    Assert-True (
-        @(Get-NetTCPConnection `
-            -LocalPort $EarlyExitPort `
-            -State Listen `
-            -ErrorAction SilentlyContinue).Count -eq 0
-    ) "early-exit test port $EarlyExitPort starts free"
+& {
+    . $LauncherPath -TestOnlyImportFunctions
 
-    $powershellExecutable = Join-Path $PSHOME "powershell.exe"
-    $earlyExitArguments = (
-        "-NoProfile -ExecutionPolicy Bypass " +
-        "-File `"$LauncherPath`" " +
-        "-Port $EarlyExitPort -NoBrowser " +
-        "-ReadyTimeoutSeconds 5 -TestInvalidServerArgument"
+    $dummyRootProcess = $null
+    $dummyRootStartTimeUtcTicks = 0
+    $dummyListenerProcess = $null
+    $dummyListenerStartTimeUtcTicks = 0
+    $earlyExitProcess = $null
+    $earlyExitStartTimeUtcTicks = 0
+    $testOwnsPort = $false
+    $earlyExitSuffix = (
+        "$EarlyExitPort-$([Guid]::NewGuid().ToString('N'))"
     )
-    $earlyExitProcess = Start-Process `
-        -FilePath $powershellExecutable `
-        -ArgumentList $earlyExitArguments `
-        -WorkingDirectory $ProjectRoot `
-        -RedirectStandardOutput $earlyExitStdoutPath `
-        -RedirectStandardError $earlyExitStderrPath `
-        -PassThru
-    $null = $earlyExitProcess.Handle
-    Assert-True (
-        $earlyExitProcess.WaitForExit(15000)
-    ) "invalid server argument exits promptly"
-    $earlyExitProcess.Refresh()
+    $earlyExitStdoutPath = Join-Path `
+        $env:TEMP `
+        "web-keyword-early-exit-$earlyExitSuffix.stdout.log"
+    $earlyExitStderrPath = Join-Path `
+        $env:TEMP `
+        "web-keyword-early-exit-$earlyExitSuffix.stderr.log"
 
-    $earlyExitStderr = Get-Content `
-        -Raw `
-        -LiteralPath $earlyExitStderrPath
-    Assert-True (
-        $earlyExitProcess.ExitCode -eq 2
-    ) "invalid server argument propagates exact exit code 2"
-    Assert-True (
-        $earlyExitStderr -match "exit code 2"
-    ) "invalid server argument writes exit code 2 diagnostic to stderr"
-    Assert-True (
-        @(Get-NetTCPConnection `
-            -LocalPort $EarlyExitPort `
-            -State Listen `
-            -ErrorAction SilentlyContinue).Count -eq 0
-    ) "early-exit test port $EarlyExitPort has no listener afterward"
-} finally {
-    if ($null -ne $earlyExitProcess) {
+    try {
+        $venvPython = Join-Path `
+            $ProjectRoot `
+            ".venv\Scripts\python.exe"
+        $python = if (Test-Path -LiteralPath $venvPython) {
+            $venvPython
+        } else {
+            (Get-Command python.exe -ErrorAction Stop).Source
+        }
+        $dummyRootProcess = Start-Process `
+            -FilePath $python `
+            -ArgumentList @(
+                "-m", "http.server", [string]$EarlyExitPort,
+                "--bind", "127.0.0.1"
+            ) `
+            -WindowStyle Hidden `
+            -PassThru
+        $null = $dummyRootProcess.Handle
+        $dummyRootStartTimeUtcTicks = [long](
+            $dummyRootProcess.StartTime.ToUniversalTime().Ticks
+        )
+
+        $dummyDeadline = (Get-Date).AddSeconds(10)
+        do {
+            $dummyRootProcess.Refresh()
+            if ($dummyRootProcess.HasExited) {
+                throw "Controlled dummy listener exited before binding."
+            }
+
+            $listeners = @(Get-NetTCPConnection `
+                -LocalPort $EarlyExitPort `
+                -State Listen `
+                -ErrorAction SilentlyContinue)
+            if ($listeners.Count -eq 1 -and
+                    (Test-IsProcessDescendantOrSelf `
+                        -CandidateProcessId $listeners[0].OwningProcess `
+                        -RootProcessId $dummyRootProcess.Id)) {
+                $candidateListenerProcess = Get-Process `
+                    -Id $listeners[0].OwningProcess `
+                    -ErrorAction SilentlyContinue
+                if ($null -ne $candidateListenerProcess) {
+                    $candidateStartTimeUtcTicks = [long](
+                        $candidateListenerProcess.StartTime.
+                            ToUniversalTime().Ticks
+                    )
+                    if (Test-ProcessIdentity `
+                            -ProcessId $candidateListenerProcess.Id `
+                            -ExpectedStartTimeUtcTicks `
+                                $candidateStartTimeUtcTicks) {
+                        $dummyListenerProcess = $candidateListenerProcess
+                        $dummyListenerStartTimeUtcTicks = (
+                            $candidateStartTimeUtcTicks
+                        )
+                        break
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $dummyDeadline)
+
+        Assert-True (
+            $null -ne $dummyListenerProcess
+        ) "controlled dummy listener owns the early-exit test port"
+        $testOwnsPort = $true
+
+        $powershellExecutable = Join-Path $PSHOME "powershell.exe"
+        $earlyExitArguments = (
+            "-NoProfile -ExecutionPolicy Bypass " +
+            "-File `"$LauncherPath`" " +
+            "-Port $EarlyExitPort -NoBrowser " +
+            "-ReadyTimeoutSeconds 5 -TestInvalidServerArgument " +
+            "-ExpectedListenerProcessId $($dummyListenerProcess.Id) " +
+            "-ExpectedListenerStartTimeUtcTicks " +
+                "$dummyListenerStartTimeUtcTicks"
+        )
+        $earlyExitProcess = Start-Process `
+            -FilePath $powershellExecutable `
+            -ArgumentList $earlyExitArguments `
+            -WorkingDirectory $ProjectRoot `
+            -RedirectStandardOutput $earlyExitStdoutPath `
+            -RedirectStandardError $earlyExitStderrPath `
+            -PassThru
+        $null = $earlyExitProcess.Handle
+        $earlyExitStartTimeUtcTicks = [long](
+            $earlyExitProcess.StartTime.ToUniversalTime().Ticks
+        )
+        Assert-True (
+            $earlyExitProcess.WaitForExit(15000)
+        ) "invalid server argument exits promptly"
         $earlyExitProcess.Refresh()
-        if (-not $earlyExitProcess.HasExited) {
-            & "$env:SystemRoot\System32\taskkill.exe" `
-                /PID $earlyExitProcess.Id /T /F `
-                *> $null
+
+        $earlyExitStderr = Get-Content `
+            -Raw `
+            -LiteralPath $earlyExitStderrPath
+        Assert-True (
+            $earlyExitProcess.ExitCode -eq 2
+        ) "invalid server argument propagates exact exit code 2"
+        Assert-True (
+            $earlyExitStderr -match "exit code 2"
+        ) "invalid server argument writes exit code 2 diagnostic to stderr"
+        $dummyListenerProcess.Refresh()
+        Assert-True (
+            $dummyListenerProcess.HasExited
+        ) "launcher stopped the controlled dummy listener"
+        Assert-True (
+            @(Get-NetTCPConnection `
+                -LocalPort $EarlyExitPort `
+                -State Listen `
+                -ErrorAction SilentlyContinue).Count -eq 0
+        ) "early-exit test port has no listener after exact exit 2"
+    } finally {
+        if ($null -ne $earlyExitProcess) {
+            Stop-LaunchedServerProcess `
+                -Process $earlyExitProcess `
+                -ExpectedStartTimeUtcTicks $earlyExitStartTimeUtcTicks
+        }
+        if ($null -ne $dummyListenerProcess) {
+            Stop-LaunchedServerProcess `
+                -Process $dummyListenerProcess `
+                -ExpectedStartTimeUtcTicks `
+                    $dummyListenerStartTimeUtcTicks
+        }
+        if ($null -ne $dummyRootProcess) {
+            Stop-LaunchedServerProcess `
+                -Process $dummyRootProcess `
+                -ExpectedStartTimeUtcTicks `
+                    $dummyRootStartTimeUtcTicks
+        }
+
+        try {
+            if ($testOwnsPort) {
+                $cleanupDeadline = (Get-Date).AddSeconds(10)
+                do {
+                    if (@(Get-NetTCPConnection `
+                            -LocalPort $EarlyExitPort `
+                            -State Listen `
+                            -ErrorAction SilentlyContinue).Count -eq 0) {
+                        break
+                    }
+                    Start-Sleep -Milliseconds 100
+                } while ((Get-Date) -lt $cleanupDeadline)
+                Assert-True (
+                    @(Get-NetTCPConnection `
+                        -LocalPort $EarlyExitPort `
+                        -State Listen `
+                        -ErrorAction SilentlyContinue).Count -eq 0
+                ) "owned early-exit test port is free after cleanup"
+            }
+        } finally {
+            Remove-Item `
+                -LiteralPath (
+                    $earlyExitStdoutPath,
+                    $earlyExitStderrPath
+                ) `
+                -Force `
+                -ErrorAction SilentlyContinue
         }
     }
-    foreach ($remainingListener in @(Get-NetTCPConnection `
-            -LocalPort $EarlyExitPort `
-            -State Listen `
-            -ErrorAction SilentlyContinue)) {
-        & "$env:SystemRoot\System32\taskkill.exe" `
-            /PID $remainingListener.OwningProcess /T /F `
-            *> $null
-    }
-    Remove-Item `
-        -LiteralPath $earlyExitStdoutPath, $earlyExitStderrPath `
-        -Force `
-        -ErrorAction SilentlyContinue
 }
 
 Write-Host "Debug launcher safety tests passed."
