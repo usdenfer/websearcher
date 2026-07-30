@@ -23,6 +23,8 @@ $batchPath = Join-Path $ProjectRoot "start_debug.bat"
 $packagePath = Join-Path $ProjectRoot "package.json"
 $serverPath = Join-Path $ProjectRoot "server.py"
 $readmePath = Join-Path $ProjectRoot "README.md"
+$designPath = Join-Path $ProjectRoot "docs\superpowers\specs\2026-07-30-one-click-debug-launcher-design.md"
+$planPath = Join-Path $ProjectRoot "docs\superpowers\plans\2026-07-30-one-click-debug-launcher.md"
 
 Assert-True (Test-Path -LiteralPath $launcherPath) "PowerShell launcher exists"
 Assert-True (Test-Path -LiteralPath $batchPath) "Batch launcher exists"
@@ -57,16 +59,23 @@ Assert-True ($launcher -match "taskkill\.exe") "launcher terminates the listener
 $server = Get-Content -Raw -Encoding UTF8 $serverPath
 Assert-True ($server -match '"--no-reload"') "server accepts --no-reload"
 
-$readme = Get-Content -Raw -Encoding UTF8 $readmePath
+$launchDocs = @(
+    @{ Name = "README"; Content = Get-Content -Raw -Encoding UTF8 $readmePath },
+    @{ Name = "launcher design"; Content = Get-Content -Raw -Encoding UTF8 $designPath },
+    @{ Name = "launcher plan"; Content = Get-Content -Raw -Encoding UTF8 $planPath }
+)
+$readme = $launchDocs[0].Content
 Assert-True ($readme -match "npm run dev") "README keeps the default npm launcher command"
 Assert-True (
-    $readme -match "npm\.cmd run dev -- -Port"
-) "README documents npm.cmd for named launcher options"
-Assert-True (
-    $readme -notmatch "npm run dev -- -Port"
-) "README does not advertise unsafe PowerShell npm Port arguments"
-Assert-True (
-    $readme -notmatch "npm run dev -- -NoBrowser"
-) "README does not advertise unsafe PowerShell npm NoBrowser arguments"
+    ($launchDocs.Content -join "`n") -match "npm\.cmd run dev -- -Port"
+) "launcher docs include npm.cmd for named launcher options"
+foreach ($launchDoc in $launchDocs) {
+    Assert-True (
+        $launchDoc.Content -notmatch "npm run dev -- -Port"
+    ) "$($launchDoc.Name) does not advertise unsafe PowerShell npm Port arguments"
+    Assert-True (
+        $launchDoc.Content -notmatch "npm run dev -- -NoBrowser"
+    ) "$($launchDoc.Name) does not advertise unsafe PowerShell npm NoBrowser arguments"
+}
 
 Write-Host "Static launcher contract passed."

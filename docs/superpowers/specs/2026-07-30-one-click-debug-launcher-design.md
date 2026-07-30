@@ -73,8 +73,8 @@ start_debug.bat 7200
 
 ```text
 npm run dev
-npm run dev -- -Port 7200
-npm run dev -- -NoBrowser
+npm.cmd run dev -- -Port 7200
+npm.cmd run dev -- -NoBrowser
 ```
 
 npm 与 Batch 不复制启动逻辑，后续修复只需修改一个 PowerShell 文件。

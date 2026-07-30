@@ -595,8 +595,8 @@ Windows 开发启动器会先结束占用目标端口的进程树，再以
 自动打开浏览器：
 
 ```powershell
-npm run dev -- -Port 7200
-npm run dev -- -NoBrowser
+npm.cmd run dev -- -Port 7200
+npm.cmd run dev -- -NoBrowser
 start_debug.bat 7200
 ```
 
