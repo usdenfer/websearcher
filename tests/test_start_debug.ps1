@@ -102,6 +102,65 @@ function Stop-ProcessTree {
     }
 }
 
+function Get-ListeningConnections {
+    param([int]$LocalPort)
+
+    return @(
+        Get-NetTCPConnection `
+            -LocalPort $LocalPort `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+    )
+}
+
+function Test-ProcessDescendsFrom {
+    param(
+        [int]$ProcessId,
+        [int]$AncestorProcessId
+    )
+
+    $currentProcessId = $ProcessId
+    $visitedProcessIds = @{}
+    while ($currentProcessId -gt 0 -and -not $visitedProcessIds.ContainsKey($currentProcessId)) {
+        if ($currentProcessId -eq $AncestorProcessId) {
+            return $true
+        }
+
+        $visitedProcessIds[$currentProcessId] = $true
+        $processInfo = Get-CimInstance `
+            -ClassName Win32_Process `
+            -Filter "ProcessId = $currentProcessId" `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $processInfo) {
+            return $false
+        }
+
+        $currentProcessId = [int]$processInfo.ParentProcessId
+    }
+
+    return $false
+}
+
+function Get-LauncherDiagnostics {
+    param(
+        [string]$StandardOutputPath,
+        [string]$StandardErrorPath
+    )
+
+    $standardOutput = if (Test-Path -LiteralPath $StandardOutputPath) {
+        Get-Content -Raw -LiteralPath $StandardOutputPath
+    } else {
+        "(stdout log was not created)"
+    }
+    $standardError = if (Test-Path -LiteralPath $StandardErrorPath) {
+        Get-Content -Raw -LiteralPath $StandardErrorPath
+    } else {
+        "(stderr log was not created)"
+    }
+
+    return "Launcher stdout ($StandardOutputPath):`n$standardOutput`nLauncher stderr ($StandardErrorPath):`n$standardError"
+}
+
 function Get-TestPython {
     $venvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
     if (Test-Path -LiteralPath $venvPython) {
@@ -110,23 +169,22 @@ function Get-TestPython {
     return (Get-Command python.exe -ErrorAction Stop).Source
 }
 
+$dummyRootProcess = $null
 $dummy = $null
 $launcherProcess = $null
-$stdoutPath = Join-Path $env:TEMP "web-keyword-debug-$Port.stdout.log"
-$stderrPath = Join-Path $env:TEMP "web-keyword-debug-$Port.stderr.log"
+$testOwnsPort = $false
+$logSuffix = "$Port-$([Guid]::NewGuid().ToString('N'))"
+$stdoutPath = Join-Path $env:TEMP "web-keyword-debug-$logSuffix.stdout.log"
+$stderrPath = Join-Path $env:TEMP "web-keyword-debug-$logSuffix.stderr.log"
 
 try {
-    if (
-        Get-NetTCPConnection `
-            -LocalPort $Port `
-            -State Listen `
-            -ErrorAction SilentlyContinue
-    ) {
+    $preflightListeners = @(Get-ListeningConnections -LocalPort $Port)
+    if ($preflightListeners.Count -gt 0) {
         throw "Integration-test port $Port is already in use."
     }
 
     $python = Get-TestPython
-    $dummy = Start-Process `
+    $dummyRootProcess = Start-Process `
         -FilePath $python `
         -ArgumentList @(
             "-m", "http.server", [string]$Port,
@@ -139,46 +197,67 @@ try {
         -TimeoutSeconds 10 `
         -FailureMessage "Dummy listener did not start on port $Port." `
         -Condition {
-            $null -ne (
-                Get-NetTCPConnection `
-                    -LocalPort $Port `
-                    -State Listen `
-                    -ErrorAction SilentlyContinue
-            )
+            $dummyRootProcess.Refresh()
+            if ($dummyRootProcess.HasExited) {
+                throw "Dummy process exited before listening with exit code $($dummyRootProcess.ExitCode)."
+            }
+
+            $listeners = @(Get-ListeningConnections -LocalPort $Port)
+            if ($listeners.Count -ne 1) {
+                return $false
+            }
+
+            $listener = $listeners[0]
+            if (-not (Test-ProcessDescendsFrom `
+                    -ProcessId $listener.OwningProcess `
+                    -AncestorProcessId $dummyRootProcess.Id)) {
+                return $false
+            }
+
+            $script:dummy = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+            return $null -ne $script:dummy -and $listener.OwningProcess -eq $script:dummy.Id
         }
 
+    $testOwnsPort = $true
+
+    $launcherExecutable = Join-Path $PSHOME "powershell.exe"
+    $launcherArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`" -Port $Port -NoBrowser"
+
     $launcherProcess = Start-Process `
-        -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
-        -ArgumentList @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", $launcherPath,
-            "-Port", [string]$Port,
-            "-NoBrowser"
-        ) `
+        -FilePath $launcherExecutable `
+        -ArgumentList $launcherArguments `
         -WorkingDirectory $ProjectRoot `
         -RedirectStandardOutput $stdoutPath `
         -RedirectStandardError $stderrPath `
         -PassThru
 
-    Wait-Until `
-        -TimeoutSeconds 30 `
-        -FailureMessage "FastAPI server did not replace the dummy listener." `
-        -Condition {
-            try {
-                $response = Invoke-WebRequest `
-                    -UseBasicParsing `
-                    -Uri "http://127.0.0.1:$Port/" `
-                    -TimeoutSec 2
-                return (
-                    $response.StatusCode -eq 200 -and
-                    $response.Content -match "站内关键词搜索"
-                )
+    try {
+        Wait-Until `
+            -TimeoutSeconds 30 `
+            -FailureMessage "FastAPI server did not replace the dummy listener." `
+            -Condition {
+                $launcherProcess.Refresh()
+                if ($launcherProcess.HasExited) {
+                    throw "Debug launcher exited before readiness with exit code $($launcherProcess.ExitCode)."
+                }
+
+                try {
+                    $response = Invoke-WebRequest `
+                        -UseBasicParsing `
+                        -Uri "http://127.0.0.1:$Port/" `
+                        -TimeoutSec 2
+                    return (
+                        $response.StatusCode -eq 200 -and
+                        $response.Content -match "站内关键词搜索"
+                    )
+                }
+                catch {
+                    return $false
+                }
             }
-            catch {
-                return $false
-            }
-        }
+    } catch {
+        throw "$($_.Exception.Message)`n$(Get-LauncherDiagnostics -StandardOutputPath $stdoutPath -StandardErrorPath $stderrPath)"
+    }
 
     $dummy.Refresh()
     Assert-True $dummy.HasExited "existing port listener was terminated"
@@ -188,18 +267,18 @@ try {
 finally {
     Stop-ProcessTree -Process $launcherProcess
     Stop-ProcessTree -Process $dummy
+    Stop-ProcessTree -Process $dummyRootProcess
 
-    Wait-Until `
-        -TimeoutSeconds 10 `
-        -FailureMessage "Integration-test port $Port remained occupied." `
-        -Condition {
-            $null -eq (
-                Get-NetTCPConnection `
-                    -LocalPort $Port `
-                    -State Listen `
-                    -ErrorAction SilentlyContinue
-            )
-        }
+    if ($testOwnsPort) {
+        Wait-Until `
+            -TimeoutSeconds 10 `
+            -FailureMessage "Integration-test port $Port remained occupied." `
+            -Condition {
+                @(Get-ListeningConnections -LocalPort $Port).Count -eq 0
+            }
+    }
+
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "All debug launcher tests passed."
