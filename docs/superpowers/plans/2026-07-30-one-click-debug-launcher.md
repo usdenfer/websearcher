@@ -389,6 +389,12 @@ Expected: the commit replaces the broken Batch content, updates `npm run dev`, a
 
 ### Task 4: Add the End-to-End Port Replacement Test
 
+> **Historical implementation note:** The inline test body below records the
+> initial red/green implementation step only. It has been superseded by the
+> committed `tests/test_start_debug.ps1` and `tests/test_start_debug_safety.ps1`,
+> which use unique temporary logs, listener identity guards, and identity-aware
+> cleanup. Do not copy the historical snippet into the current test files.
+
 **Files:**
 - Modify: `tests/test_start_debug.ps1`
 

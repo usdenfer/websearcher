@@ -122,11 +122,17 @@ Gamersky 仅用于验证通用规则。公开网站可能随时改版、限流�
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests -q
+
+# Windows 一键启动器的静态契约、端口替换和清理测试
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+  -NoProfile -ExecutionPolicy Bypass `
+  -File tests\test_start_debug.ps1
 ```
 
 测试包含发现模型、URL 规范化、解析器、Provider、适配器、预算、正文匹配、
 API/任务兼容性、端到端 fixture、冒烟脚本和前端诊断。需要 Chromium 的测试
-在浏览器不可用时会跳过。
+在浏览器不可用时会跳过；启动器测试会在独立测试端口验证旧监听进程替换、
+`--no-reload` 启动以及退出后的端口清理。
 
 ## 项目结构
 

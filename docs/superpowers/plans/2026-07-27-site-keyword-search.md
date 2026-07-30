@@ -1046,100 +1046,20 @@ git commit -m "feat: single-page frontend with grouped results and jump links"
 
 ---
 
-### Task 5: package.json 与 dev 启动脚本 + 端到端验证
+### Task 5: package.json 与 dev 启动脚本 + 端到端验证（已被取代）
 
-**Files:**
-- Create: `package.json`、`scripts/dev.mjs`、`.gitignore`
-
-**Interfaces:**
-- Produces: `npm.cmd run dev [-- --host H --port P]` 启动 Python 服务（默认 127.0.0.1:7100）；停止 dev 进程即停止服务。
-
-- [ ] **Step 1: Write the files**
-
-创建 `package.json`：
-
-```json
-{
-  "name": "web-keyword-catcher",
-  "version": "0.1.0",
-  "private": true,
-  "description": "站内关键词搜索工具（FastAPI + 原生前端）",
-  "scripts": {
-    "dev": "node scripts/dev.mjs"
-  }
-}
-```
-
-创建 `scripts/dev.mjs`：
-
-```javascript
-// Dev launcher: forward --host/--port CLI args to the Python server.
-import { spawn } from "node:child_process";
-
-const args = process.argv.slice(2);
-let host = "127.0.0.1";
-let port = "7100";
-for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (a === "--host" && args[i + 1]) host = args[++i];
-  else if (a.startsWith("--host=")) host = a.slice(7);
-  else if (a === "--port" && args[i + 1]) port = args[++i];
-  else if (a.startsWith("--port=")) port = a.slice(7);
-}
-
-const python = process.env.PYTHON || "python";
-const child = spawn(python, ["server.py", "--host", host, "--port", port], {
-  stdio: "inherit",
-  cwd: new URL("..", import.meta.url),
-});
-
-child.on("error", (err) => {
-  console.error("无法启动 Python 服务：", err.message);
-  process.exit(1);
-});
-child.on("exit", (code) => process.exit(code ?? 0));
-
-for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => child.kill(sig));
-}
-```
-
-创建 `.gitignore`：
-
-```
-__pycache__/
-.pytest_cache/
-*.pyc
-node_modules/
-```
-
-- [ ] **Step 2: Verify dev server end-to-end**
-
-Run:
-
-```bash
-cd /d D:\WebProjects\web_keyword_catcher
-npm.cmd run dev -- --port 7123 &
-sleep 4
-curl -s http://127.0.0.1:7123/ | head -c 200
-curl -s -X POST http://127.0.0.1:7123/api/search -H "Content-Type: application/json" -d '{"startUrl":"http://127.0.0.1:7123/","keywords":["关键词"]}'
-kill %1
-```
-
-Expected: `GET /` 返回页面 HTML（含"站内关键词搜索"）；`POST /api/search` 返回 JSON 且 `totalHits >= 1`（首页含"关键词"字样）；进程被正常终止，无残留。
-
-- [ ] **Step 3: Run full test suite once more**
-
-Run: `cd /d D:\WebProjects\web_keyword_catcher && python -m pytest tests/ -v`
-Expected: 全部通过
-
-- [ ] **Step 4: Commit**
-
-```bash
-cd /d D:\WebProjects\web_keyword_catcher
-git add package.json scripts/dev.mjs .gitignore
-git commit -m "chore: npm dev launcher with port forwarding"
-```
+> 本节原先描述的 `scripts/dev.mjs` 启动器已被
+> `docs/superpowers/plans/2026-07-30-one-click-debug-launcher.md` 取代，请勿执行旧步骤。
+> 当前统一入口为 `npm run dev`、`start_debug.bat` 和
+> `scripts/start-debug.ps1`，服务始终使用 `--no-reload`。
+>
+> PowerShell 或 IDE 中传递命名参数时使用：
+>
+> ```powershell
+> npm.cmd run dev -- -Port 7123 -NoBrowser
+> ```
+>
+> 当前端到端验证由 `tests/test_start_debug.ps1` 负责。
 
 ---
 
