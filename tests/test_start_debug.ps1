@@ -171,11 +171,18 @@ function Get-TestPython {
 
 $dummyRootProcess = $null
 $dummy = $null
+$mismatchLauncherProcess = $null
 $launcherProcess = $null
 $testOwnsPort = $false
 $logSuffix = "$Port-$([Guid]::NewGuid().ToString('N'))"
 $stdoutPath = Join-Path $env:TEMP "web-keyword-debug-$logSuffix.stdout.log"
 $stderrPath = Join-Path $env:TEMP "web-keyword-debug-$logSuffix.stderr.log"
+$mismatchStdoutPath = Join-Path `
+    $env:TEMP `
+    "web-keyword-debug-mismatch-$logSuffix.stdout.log"
+$mismatchStderrPath = Join-Path `
+    $env:TEMP `
+    "web-keyword-debug-mismatch-$logSuffix.stderr.log"
 
 try {
     $preflightListeners = @(Get-ListeningConnections -LocalPort $Port)
@@ -221,7 +228,55 @@ try {
     $testOwnsPort = $true
 
     $launcherExecutable = Join-Path $PSHOME "powershell.exe"
-    $launcherArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`" -Port $Port -NoBrowser"
+    $dummyStartTimeUtcTicks = [long](
+        $dummy.StartTime.ToUniversalTime().Ticks
+    )
+    $mismatchedStartTimeUtcTicks = $dummyStartTimeUtcTicks + 1
+    $mismatchLauncherArguments = (
+        "-NoProfile -ExecutionPolicy Bypass " +
+        "-File `"$launcherPath`" -Port $Port -NoBrowser " +
+        "-ExpectedListenerProcessId $($dummy.Id) " +
+        "-ExpectedListenerStartTimeUtcTicks $mismatchedStartTimeUtcTicks"
+    )
+    $mismatchLauncherProcess = Start-Process `
+        -FilePath $launcherExecutable `
+        -ArgumentList $mismatchLauncherArguments `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardOutput $mismatchStdoutPath `
+        -RedirectStandardError $mismatchStderrPath `
+        -PassThru
+    $null = $mismatchLauncherProcess.Handle
+    Assert-True (
+        $mismatchLauncherProcess.WaitForExit(15000)
+    ) "mismatched expected listener identity exits promptly"
+    $mismatchLauncherProcess.Refresh()
+    Assert-True (
+        $mismatchLauncherProcess.ExitCode -ne 0
+    ) "mismatched expected listener identity is refused"
+    $mismatchDiagnostics = Get-LauncherDiagnostics `
+        -StandardOutputPath $mismatchStdoutPath `
+        -StandardErrorPath $mismatchStderrPath
+    Assert-True (
+        $mismatchDiagnostics -match "does not match"
+    ) "mismatched listener refusal is diagnosed"
+    $dummy.Refresh()
+    Assert-True (
+        -not $dummy.HasExited
+    ) "mismatched expected listener identity does not kill the listener"
+    Assert-True (
+        @(
+            Get-ListeningConnections -LocalPort $Port |
+                Where-Object { $_.OwningProcess -eq $dummy.Id }
+        ).Count -eq 1
+    ) "mismatched expected listener remains listening"
+    Write-Host "Expected-listener mismatch refusal passed."
+
+    $launcherArguments = (
+        "-NoProfile -ExecutionPolicy Bypass " +
+        "-File `"$launcherPath`" -Port $Port -NoBrowser " +
+        "-ExpectedListenerProcessId $($dummy.Id) " +
+        "-ExpectedListenerStartTimeUtcTicks $dummyStartTimeUtcTicks"
+    )
 
     $launcherProcess = Start-Process `
         -FilePath $launcherExecutable `
@@ -266,6 +321,7 @@ try {
 }
 finally {
     Stop-ProcessTree -Process $launcherProcess
+    Stop-ProcessTree -Process $mismatchLauncherProcess
     Stop-ProcessTree -Process $dummy
     Stop-ProcessTree -Process $dummyRootProcess
 
@@ -278,7 +334,15 @@ finally {
             }
     }
 
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    Remove-Item `
+        -LiteralPath @(
+            $stdoutPath,
+            $stderrPath,
+            $mismatchStdoutPath,
+            $mismatchStderrPath
+        ) `
+        -Force `
+        -ErrorAction SilentlyContinue
 }
 
 Write-Host "All debug launcher tests passed."

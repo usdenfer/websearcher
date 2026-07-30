@@ -31,7 +31,11 @@ param(
             throw "HostName is not a valid IPv4 address."
         }
 
-        $dnsName = $candidate.TrimEnd(".")
+        $dnsName = if ($candidate.EndsWith(".")) {
+            $candidate.Substring(0, $candidate.Length - 1)
+        } else {
+            $candidate
+        }
         $dnsPattern = "^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$"
         if ($dnsName -notmatch $dnsPattern) {
             throw "HostName is not a valid DNS hostname."
@@ -94,11 +98,23 @@ function Get-ProcessStartTimeUtcTicks {
 function Get-CimProcess {
     param([int]$ProcessId)
 
+    return Get-CimInstance `
+        -ClassName Win32_Process `
+        -Filter "ProcessId = $ProcessId" `
+        -ErrorAction Stop
+}
+
+function Get-CimProcessCreationTimeUtcTicks {
+    param($ProcessInfo)
+
     try {
-        return Get-CimInstance `
-            -ClassName Win32_Process `
-            -Filter "ProcessId = $ProcessId" `
-            -ErrorAction Stop
+        if ($null -eq $ProcessInfo -or
+                $null -eq $ProcessInfo.CreationDate) {
+            return $null
+        }
+        return [long](
+            ([datetime]$ProcessInfo.CreationDate).ToUniversalTime().Ticks
+        )
     } catch {
         return $null
     }
@@ -156,17 +172,44 @@ function Test-IsProcessDescendantOrSelf {
 
     $visitedProcessIds = @{}
     $cursorProcessId = $CandidateProcessId
+    $cursorProcessInfo = $null
     while ($cursorProcessId -gt 0 -and
             -not $visitedProcessIds.ContainsKey($cursorProcessId)) {
         if ($cursorProcessId -eq $RootProcessId) {
             return $true
         }
         $visitedProcessIds[$cursorProcessId] = $true
-        $processInfo = Get-CimProcess -ProcessId $cursorProcessId
-        if ($null -eq $processInfo) {
+
+        if ($null -eq $cursorProcessInfo) {
+            $cursorProcessInfo = Get-CimProcess `
+                -ProcessId $cursorProcessId
+        }
+        if ($null -eq $cursorProcessInfo) {
             return $false
         }
-        $cursorProcessId = [int]$processInfo.ParentProcessId
+
+        $parentProcessId = [int]$cursorProcessInfo.ParentProcessId
+        if ($parentProcessId -le 0) {
+            return $false
+        }
+        $parentProcessInfo = Get-CimProcess `
+            -ProcessId $parentProcessId
+        if ($null -eq $parentProcessInfo) {
+            return $false
+        }
+
+        $childCreatedUtcTicks = Get-CimProcessCreationTimeUtcTicks `
+            -ProcessInfo $cursorProcessInfo
+        $parentCreatedUtcTicks = Get-CimProcessCreationTimeUtcTicks `
+            -ProcessInfo $parentProcessInfo
+        if ($null -eq $childCreatedUtcTicks -or
+                $null -eq $parentCreatedUtcTicks -or
+                $parentCreatedUtcTicks -gt $childCreatedUtcTicks) {
+            return $false
+        }
+
+        $cursorProcessId = $parentProcessId
+        $cursorProcessInfo = $parentProcessInfo
     }
     return $false
 }

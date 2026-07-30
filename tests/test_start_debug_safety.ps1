@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateRange(1024, 65535)]
+    [int]$EarlyExitPort = 48241
+)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -101,7 +104,9 @@ foreach ($invalidHostName in @(
         "1.2.3",
         "::1",
         "[::1]",
-        "bad_name.example"
+        "bad_name.example",
+        "example.com..",
+        "localhost..."
     )) {
     Assert-Throws `
         -MessagePattern "HostName" `
@@ -147,6 +152,106 @@ foreach ($invalidHostName in @(
     Assert-True (
         $protectedProcessIds -contains 1234
     ) "last known ancestor PID remains protected when its historical parent is gone"
+}
+
+& {
+    . $LauncherPath -TestOnlyImportFunctions
+    function Get-CimProcess {
+        param([int]$ProcessId)
+        switch ($ProcessId) {
+            30 {
+                return [pscustomobject]@{
+                    ProcessId = 30
+                    ParentProcessId = 20
+                    CreationDate = [datetime]"2026-01-01T00:00:03Z"
+                }
+            }
+            20 {
+                return [pscustomobject]@{
+                    ProcessId = 20
+                    ParentProcessId = 10
+                    CreationDate = [datetime]"2026-01-01T00:00:04Z"
+                }
+            }
+            10 {
+                return [pscustomobject]@{
+                    ProcessId = 10
+                    ParentProcessId = 0
+                    CreationDate = [datetime]"2026-01-01T00:00:01Z"
+                }
+            }
+        }
+        return $null
+    }
+
+    Assert-True (
+        -not (Test-IsProcessDescendantOrSelf `
+            -CandidateProcessId 30 `
+            -RootProcessId 10)
+    ) "ancestry rejects a parent PID reused after the child was created"
+}
+
+& {
+    . $LauncherPath -TestOnlyImportFunctions
+    function Get-CimProcess {
+        param([int]$ProcessId)
+        switch ($ProcessId) {
+            30 {
+                return [pscustomobject]@{
+                    ProcessId = 30
+                    ParentProcessId = 20
+                    CreationDate = [datetime]"2026-01-01T00:00:03Z"
+                }
+            }
+            20 {
+                return [pscustomobject]@{
+                    ProcessId = 20
+                    ParentProcessId = 10
+                    CreationDate = [datetime]"2026-01-01T00:00:02Z"
+                }
+            }
+            10 {
+                return [pscustomobject]@{
+                    ProcessId = 10
+                    ParentProcessId = 0
+                    CreationDate = [datetime]"2026-01-01T00:00:01Z"
+                }
+            }
+        }
+        return $null
+    }
+
+    Assert-True (
+        Test-IsProcessDescendantOrSelf `
+            -CandidateProcessId 30 `
+            -RootProcessId 10
+    ) "ancestry accepts a creation-ordered parent chain"
+}
+
+& {
+    . $LauncherPath -TestOnlyImportFunctions
+    $state = [pscustomobject]@{ Kills = 0 }
+    function Get-ListeningProcessSnapshots {
+        @([pscustomobject]@{
+            ProcessId = 42
+            StartTimeUtcTicks = 100
+        })
+    }
+    function Get-CimInstance {
+        throw "injected CIM query failure"
+    }
+    function Invoke-ProcessTreeKill {
+        param([int]$ProcessId)
+        $state.Kills++
+    }
+
+    Assert-Throws `
+        -MessagePattern "injected CIM query failure" `
+        -Message "CIM failure aborts ancestor protection without being hidden" `
+        -Action { Stop-PortListeners -LocalPort 61234 }
+    Assert-True (
+        $state.Kills -eq 0
+    ) "CIM failure refused before taskkill"
 }
 
 & {
@@ -342,6 +447,80 @@ foreach ($invalidHostName in @(
             -ServerProcessId 70 `
             -ServerStartTimeUtcTicks 700)
     ) "readiness refuses a reused server root identity"
+}
+
+$earlyExitProcess = $null
+$earlyExitSuffix = "$EarlyExitPort-$([Guid]::NewGuid().ToString('N'))"
+$earlyExitStdoutPath = Join-Path `
+    $env:TEMP `
+    "web-keyword-early-exit-$earlyExitSuffix.stdout.log"
+$earlyExitStderrPath = Join-Path `
+    $env:TEMP `
+    "web-keyword-early-exit-$earlyExitSuffix.stderr.log"
+try {
+    Assert-True (
+        @(Get-NetTCPConnection `
+            -LocalPort $EarlyExitPort `
+            -State Listen `
+            -ErrorAction SilentlyContinue).Count -eq 0
+    ) "early-exit test port $EarlyExitPort starts free"
+
+    $powershellExecutable = Join-Path $PSHOME "powershell.exe"
+    $earlyExitArguments = (
+        "-NoProfile -ExecutionPolicy Bypass " +
+        "-File `"$LauncherPath`" " +
+        "-Port $EarlyExitPort -NoBrowser " +
+        "-ReadyTimeoutSeconds 5 -TestInvalidServerArgument"
+    )
+    $earlyExitProcess = Start-Process `
+        -FilePath $powershellExecutable `
+        -ArgumentList $earlyExitArguments `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardOutput $earlyExitStdoutPath `
+        -RedirectStandardError $earlyExitStderrPath `
+        -PassThru
+    $null = $earlyExitProcess.Handle
+    Assert-True (
+        $earlyExitProcess.WaitForExit(15000)
+    ) "invalid server argument exits promptly"
+    $earlyExitProcess.Refresh()
+
+    $earlyExitStderr = Get-Content `
+        -Raw `
+        -LiteralPath $earlyExitStderrPath
+    Assert-True (
+        $earlyExitProcess.ExitCode -eq 2
+    ) "invalid server argument propagates exact exit code 2"
+    Assert-True (
+        $earlyExitStderr -match "exit code 2"
+    ) "invalid server argument writes exit code 2 diagnostic to stderr"
+    Assert-True (
+        @(Get-NetTCPConnection `
+            -LocalPort $EarlyExitPort `
+            -State Listen `
+            -ErrorAction SilentlyContinue).Count -eq 0
+    ) "early-exit test port $EarlyExitPort has no listener afterward"
+} finally {
+    if ($null -ne $earlyExitProcess) {
+        $earlyExitProcess.Refresh()
+        if (-not $earlyExitProcess.HasExited) {
+            & "$env:SystemRoot\System32\taskkill.exe" `
+                /PID $earlyExitProcess.Id /T /F `
+                *> $null
+        }
+    }
+    foreach ($remainingListener in @(Get-NetTCPConnection `
+            -LocalPort $EarlyExitPort `
+            -State Listen `
+            -ErrorAction SilentlyContinue)) {
+        & "$env:SystemRoot\System32\taskkill.exe" `
+            /PID $remainingListener.OwningProcess /T /F `
+            *> $null
+    }
+    Remove-Item `
+        -LiteralPath $earlyExitStdoutPath, $earlyExitStderrPath `
+        -Force `
+        -ErrorAction SilentlyContinue
 }
 
 Write-Host "Debug launcher safety tests passed."
