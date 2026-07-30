@@ -4,6 +4,6 @@
   "private": true,
   "description": "站内关键词搜索工具（FastAPI + 原生前端）",
   "scripts": {
-    "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
+    "dev": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
   }
 }

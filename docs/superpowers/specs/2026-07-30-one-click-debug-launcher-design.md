@@ -49,7 +49,7 @@
 `start_debug.bat` 仅完成三件事：
 
 1. 切换到仓库根目录。
-2. 调用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start-debug.ps1`。
+2. 调用 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start-debug.ps1`。
 3. 在失败时保留窗口并显示退出码。
 
 Batch 文件只使用 ASCII 文本，不包含管道、复杂括号块或中文注释，避免再次触发编码和解析问题。
@@ -66,7 +66,7 @@ start_debug.bat 7200
 `package.json` 的现有 `dev` 命令改为：
 
 ```json
-"dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
+"dev": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
 ```
 
 常用方式：

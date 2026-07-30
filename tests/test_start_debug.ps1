@@ -28,15 +28,30 @@ Assert-True (Test-Path -LiteralPath $launcherPath) "PowerShell launcher exists"
 Assert-True (Test-Path -LiteralPath $batchPath) "Batch launcher exists"
 
 $package = Get-Content -Raw -Encoding UTF8 $packagePath | ConvertFrom-Json
+$expectedNpmDevCommand = (
+    '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" ' +
+    '-NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1'
+)
 Assert-True (
-    $package.scripts.dev -eq
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-debug.ps1"
-) "npm run dev uses the shared PowerShell launcher"
+    $package.scripts.dev -ceq $expectedNpmDevCommand
+) "npm run dev resolves Windows PowerShell absolutely"
+Assert-True (
+    $package.scripts.dev -notmatch "(?i)(^|\s)powershell\.exe(?:\s|$)"
+) "npm run dev does not use a bare PowerShell executable"
 
 $batch = Get-Content -Raw -Encoding ASCII $batchPath
 Assert-True (
     $batch -match "scripts\\start-debug\.ps1"
 ) "Batch launcher uses the shared PowerShell launcher"
+Assert-True (
+    $batch -match 'set "POWERSHELL_EXE=%SystemRoot%\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe"'
+) "Batch launcher resolves Windows PowerShell absolutely"
+Assert-True (
+    $batch -match 'if not exist "%POWERSHELL_EXE%"'
+) "Batch launcher diagnoses a missing Windows PowerShell executable"
+Assert-True (
+    $batch -notmatch "(?im)^\s*powershell\.exe(?:\s|$)"
+) "Batch launcher does not use a bare PowerShell executable"
 
 $launcher = Get-Content -Raw -Encoding UTF8 $launcherPath
 $tokens = $null
@@ -59,7 +74,14 @@ Assert-True ($server -match '"--no-reload"') "server accepts --no-reload"
 
 $readme = Get-Content -Raw -Encoding UTF8 $readmePath
 Assert-True ($readme -match "npm run dev") "README keeps the default npm launcher command"
-$markdownDocs = @(Get-ChildItem -LiteralPath $ProjectRoot -Recurse -File -Filter "*.md")
+$trackedMarkdownPaths = @(
+    & git.exe -C $ProjectRoot ls-files -- "*.md"
+)
+Assert-True ($LASTEXITCODE -eq 0) "tracked Markdown files can be listed"
+$markdownDocs = @(
+    $trackedMarkdownPaths |
+        ForEach-Object { Get-Item -LiteralPath (Join-Path $ProjectRoot $_) }
+)
 $markdownContent = @($markdownDocs | ForEach-Object {
     Get-Content -Raw -Encoding UTF8 $_.FullName
 })
@@ -325,24 +347,27 @@ finally {
     Stop-ProcessTree -Process $dummy
     Stop-ProcessTree -Process $dummyRootProcess
 
-    if ($testOwnsPort) {
-        Wait-Until `
-            -TimeoutSeconds 10 `
-            -FailureMessage "Integration-test port $Port remained occupied." `
-            -Condition {
-                @(Get-ListeningConnections -LocalPort $Port).Count -eq 0
-            }
+    try {
+        if ($testOwnsPort) {
+            Wait-Until `
+                -TimeoutSeconds 10 `
+                -FailureMessage "Integration-test port $Port remained occupied." `
+                -Condition {
+                    @(Get-ListeningConnections -LocalPort $Port).Count -eq 0
+                }
+        }
     }
-
-    Remove-Item `
-        -LiteralPath @(
-            $stdoutPath,
-            $stderrPath,
-            $mismatchStdoutPath,
-            $mismatchStderrPath
-        ) `
-        -Force `
-        -ErrorAction SilentlyContinue
+    finally {
+        Remove-Item `
+            -LiteralPath @(
+                $stdoutPath,
+                $stderrPath,
+                $mismatchStdoutPath,
+                $mismatchStderrPath
+            ) `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "All debug launcher tests passed."
