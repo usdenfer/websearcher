@@ -1052,7 +1052,7 @@ git commit -m "feat: single-page frontend with grouped results and jump links"
 - Create: `package.json`、`scripts/dev.mjs`、`.gitignore`
 
 **Interfaces:**
-- Produces: `npm run dev [-- --host H --port P]` 启动 Python 服务（默认 127.0.0.1:7100）；停止 dev 进程即停止服务。
+- Produces: `npm.cmd run dev [-- --host H --port P]` 启动 Python 服务（默认 127.0.0.1:7100）；停止 dev 进程即停止服务。
 
 - [ ] **Step 1: Write the files**
 
