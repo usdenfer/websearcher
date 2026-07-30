@@ -57,6 +57,17 @@ npm run dev
 # 默认 http://127.0.0.1:7100
 ```
 
+`npm run dev` 是默认的一键启动方式。在 PowerShell 或 IDE 中需要指定任意
+启动参数时，请显式使用 `npm.cmd`，例如：
+
+```powershell
+npm.cmd run dev -- -Port 7200 -NoBrowser
+npm.cmd run dev -- -Host 0.0.0.0 -Port 7200
+```
+
+PowerShell 会将 `npm` 解析为 `npm.ps1`，它会剥离 PowerShell 风格的参数名；
+因此带命名启动参数时必须使用 `npm.cmd`。
+
 不配置 AI key 时，正文搜索仍可正常使用，AI 功能会降级。
 
 ## API 兼容性
