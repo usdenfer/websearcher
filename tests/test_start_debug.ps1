@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 47123
@@ -74,3 +74,132 @@ for ($index = 0; $index -lt $markdownDocs.Count; $index++) {
 }
 
 Write-Host "Static launcher contract passed."
+
+function Wait-Until {
+    param(
+        [scriptblock]$Condition,
+        [int]$TimeoutSeconds,
+        [string]$FailureMessage
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (& $Condition) {
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    throw $FailureMessage
+}
+
+function Stop-ProcessTree {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -ne $Process -and -not $Process.HasExited) {
+        & "$env:SystemRoot\System32\taskkill.exe" `
+            /PID $Process.Id /T /F `
+            *> $null
+    }
+}
+
+function Get-TestPython {
+    $venvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPython) {
+        return $venvPython
+    }
+    return (Get-Command python.exe -ErrorAction Stop).Source
+}
+
+$dummy = $null
+$launcherProcess = $null
+$stdoutPath = Join-Path $env:TEMP "web-keyword-debug-$Port.stdout.log"
+$stderrPath = Join-Path $env:TEMP "web-keyword-debug-$Port.stderr.log"
+
+try {
+    if (
+        Get-NetTCPConnection `
+            -LocalPort $Port `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+    ) {
+        throw "Integration-test port $Port is already in use."
+    }
+
+    $python = Get-TestPython
+    $dummy = Start-Process `
+        -FilePath $python `
+        -ArgumentList @(
+            "-m", "http.server", [string]$Port,
+            "--bind", "127.0.0.1"
+        ) `
+        -WindowStyle Hidden `
+        -PassThru
+
+    Wait-Until `
+        -TimeoutSeconds 10 `
+        -FailureMessage "Dummy listener did not start on port $Port." `
+        -Condition {
+            $null -ne (
+                Get-NetTCPConnection `
+                    -LocalPort $Port `
+                    -State Listen `
+                    -ErrorAction SilentlyContinue
+            )
+        }
+
+    $launcherProcess = Start-Process `
+        -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $launcherPath,
+            "-Port", [string]$Port,
+            "-NoBrowser"
+        ) `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+
+    Wait-Until `
+        -TimeoutSeconds 30 `
+        -FailureMessage "FastAPI server did not replace the dummy listener." `
+        -Condition {
+            try {
+                $response = Invoke-WebRequest `
+                    -UseBasicParsing `
+                    -Uri "http://127.0.0.1:$Port/" `
+                    -TimeoutSec 2
+                return (
+                    $response.StatusCode -eq 200 -and
+                    $response.Content -match "站内关键词搜索"
+                )
+            }
+            catch {
+                return $false
+            }
+        }
+
+    $dummy.Refresh()
+    Assert-True $dummy.HasExited "existing port listener was terminated"
+    Assert-True (-not $launcherProcess.HasExited) "launcher remains active with server"
+    Write-Host "Port replacement integration passed."
+}
+finally {
+    Stop-ProcessTree -Process $launcherProcess
+    Stop-ProcessTree -Process $dummy
+
+    Wait-Until `
+        -TimeoutSeconds 10 `
+        -FailureMessage "Integration-test port $Port remained occupied." `
+        -Condition {
+            $null -eq (
+                Get-NetTCPConnection `
+                    -LocalPort $Port `
+                    -State Listen `
+                    -ErrorAction SilentlyContinue
+            )
+        }
+}
+
+Write-Host "All debug launcher tests passed."
