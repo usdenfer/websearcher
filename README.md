@@ -64,8 +64,8 @@ uvicorn reload worker 残留。
 
 也可以在资源管理器中双击 `start_debug.bat` 启动。要指定端口，请使用：
 
-```text
-start_debug.bat 7200
+```powershell
+.\start_debug.bat 7200
 ```
 
 在 PowerShell 或 IDE 中使用自定义选项时，请显式使用 `npm.cmd`，不要使用
