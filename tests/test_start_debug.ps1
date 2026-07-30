@@ -38,6 +38,17 @@ Assert-True (
 ) "Batch launcher uses the shared PowerShell launcher"
 
 $launcher = Get-Content -Raw -Encoding UTF8 $launcherPath
+$tokens = $null
+$parseErrors = $null
+$launcherAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $launcherPath,
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+Assert-True ($parseErrors.Count -eq 0) "launcher parses successfully"
+Assert-True (
+    $launcherAst.ParamBlock.Parameters[0].Name.VariablePath.UserPath -eq "Port"
+) "launcher binds a surviving npm positional argument to Port"
 Assert-True ($launcher -match '"--no-reload"') "launcher always supplies --no-reload"
 Assert-True ($launcher -match "Get-NetTCPConnection") "launcher checks the target port"
 Assert-True ($launcher -match "taskkill\.exe") "launcher terminates the listener tree"

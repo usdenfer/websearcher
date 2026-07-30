@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-    [Alias("Host")]
-    [string]$HostName = "127.0.0.1",
-
     [ValidateRange(1, 65535)]
     [int]$Port = 7100,
+
+    [Alias("Host")]
+    [string]$HostName = "127.0.0.1",
 
     [switch]$NoBrowser,
 
