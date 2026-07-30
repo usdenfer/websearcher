@@ -479,8 +479,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="站内关键词搜索工具")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7100)
+    parser.add_argument(
+        "--no-reload",
+        action="store_true",
+        help="单进程运行（不做文件变更自动重启），停止时不留 worker 进程",
+    )
     args = parser.parse_args()
     # reload=True: dev server auto-restarts when Python files change,
-    # so the preview never serves stale backend code
-    uvicorn.run("server:app", host=args.host, port=args.port, reload=True,
+    # so the preview never serves stale backend code; --no-reload keeps one
+    # process for the launcher so its process tree can be stopped cleanly.
+    uvicorn.run("server:app", host=args.host, port=args.port,
+                reload=not args.no_reload,
                 loop="server:proactor_loop_factory")
