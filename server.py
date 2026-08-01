@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ from pydantic import BaseModel, field_validator
 from crawler import (PAGE_TIMEOUT, USER_AGENT, CrawlResult, crawl,
                      crawl_archive, describe_error, fetch_html)
 from ai import (AIError, ask_prompt, chat_stream, expand_keywords,
-                summarize_prompt)
+                parse_ai_entries, summarize_prompt)
 from cache import get as cache_get
 from cache import put as cache_put
 from discovery import (
@@ -56,7 +57,6 @@ app = FastAPI(title="站内关键词搜索工具")
 class SearchRequest(BaseModel):
     startUrl: str
     keywords: list[str] | str
-    depth: int = 1
     render: str = "auto"
 
     @field_validator("render")
@@ -83,13 +83,6 @@ class SearchRequest(BaseModel):
         v = [k.strip() for k in v if k.strip()]
         if not v:
             raise ValueError("至少需要一个关键词")
-        return v
-
-    @field_validator("depth")
-    @classmethod
-    def check_depth(cls, v: int) -> int:
-        if not 1 <= v <= 3:
-            raise ValueError("搜索深度必须在 1~3 层之间")
         return v
 
 
@@ -155,10 +148,11 @@ async def search(req: SearchRequest) -> dict:
     deadline = budget.deadline
     host = urlsplit(req.startUrl).netloc
     try:
-        async with asyncio.timeout(budget.remaining_seconds()):
+        async with asyncio.timeout(30):
             expanded = await expand_keywords(req.keywords, host)
     except TimeoutError:
         expanded = []
+    expanded = _filter_off_topic(req.keywords, expanded)
     all_keywords = req.keywords + [
         k for k in expanded if k not in req.keywords]
 
@@ -176,11 +170,11 @@ async def search(req: SearchRequest) -> dict:
         auto_note = "归档深扫：已全量翻页栏目列表并抓取全部文章正文"
     elif req.render == "on":
         crawl_result = await _crawl_or_502(
-            req.startUrl, req.depth, True, deadline, budget)
+            req.startUrl, 3, True, deadline, budget)
         render_used = True
     else:
         crawl_result = await _crawl_or_502(
-            req.startUrl, req.depth, False, deadline, budget)
+            req.startUrl, 3, False, deadline, budget)
         if req.render == "auto" and crawl_result.pages:
             _, static_hits = _match_crawl(crawl_result, all_keywords)
             js_suspect = looks_js_driven(crawl_result.pages[0].html)
@@ -188,7 +182,7 @@ async def search(req: SearchRequest) -> dict:
                                     and static_hits <= AUTO_LOW_HITS):
                 try:
                     render_result = await _crawl_or_502(
-                        req.startUrl, req.depth, True, deadline, budget)
+                        req.startUrl, 3, True, deadline, budget)
                 except HTTPException:
                     auto_note = "静态结果可能不完整，自动渲染补搜失败"
                 else:
@@ -220,7 +214,7 @@ async def search(req: SearchRequest) -> dict:
                 req.startUrl,
                 all_keywords,
                 crawl_result,
-                req.depth,
+                3,
                 req.render,
                 budget=budget,
             )
@@ -262,7 +256,7 @@ async def search(req: SearchRequest) -> dict:
         "startUrl": req.startUrl,
         "keywords": req.keywords,
         "expandedKeywords": expanded,
-        "depth": req.depth,
+        "depth": 3,
         "render": render_used,
         "renderMode": req.render,
         "autoNote": auto_note,
@@ -293,7 +287,11 @@ async def search(req: SearchRequest) -> dict:
 
 @app.get("/api/locate")
 async def locate(url: str, keyword: str) -> HTMLResponse:
-    """Return a sanitized copy of `url` with obvious keyword highlighting."""
+    """Return a sanitized copy of `url` with obvious keyword highlighting.
+
+    For yngp.com: warms the session (GET list page + POST district API)
+    so the detail page request passes the server's anti-hotlinking check.
+    """
     url = url.strip()
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.netloc:
@@ -301,11 +299,37 @@ async def locate(url: str, keyword: str) -> HTMLResponse:
     keyword = keyword.strip()
     if not keyword:
         raise HTTPException(422, "keyword 不能为空")
+    origin = f"{parts.scheme}://{parts.netloc}"
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    referer = f"{origin}/"
     async with httpx.AsyncClient(
         timeout=PAGE_TIMEOUT,
         follow_redirects=True,
-        headers={"User-Agent": USER_AGENT},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Referer": referer,
+            **({"Origin": origin} if hostname == "yngp.com" or hostname.endswith(".yngp.com") else {}),
+        },
     ) as client:
+        # yngp.com 需要先建立会话（访问列表页 + 调行政区划接口），
+        # 否则详情页返回"请验证后再访问"
+        if hostname == "yngp.com" or hostname.endswith(".yngp.com"):
+            try:
+                await client.get(
+                    origin + "/page/procurement/procurementList.html",
+                )
+                await client.post(
+                    origin + "/api/common/otheruse.getdistrictlist.svc",
+                    content="",
+                    headers={
+                        "Origin": origin,
+                        "Referer": origin + "/page/procurement/procurementList.html",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    },
+                )
+            except Exception:
+                pass
         try:
             html = await fetch_html(client, url)
         except httpx.HTTPStatusError as exc:
@@ -325,6 +349,257 @@ async def sse_stream(messages: list[dict]):
     try:
         async for delta in chat_stream(messages):
             yield sse_event({"type": "delta", "text": delta})
+        yield sse_event({"type": "done"})
+    except AIError as exc:
+        yield sse_event({"type": "error", "message": str(exc)})
+
+
+def _filter_off_topic(original: list[str], expanded: list[str]) -> list[str]:
+    """Remove expanded keywords that diverge into unrelated domains.
+    An expanded keyword must share at least one Chinese character with
+    at least one original keyword, or be a location-variant of the search."""
+    if not expanded:
+        return []
+    # 收集原始关键词的所有中文字符
+    orig_chars: set[str] = set()
+    for k in original:
+        orig_chars.update(re.findall(r'[\u4e00-\u9fff]', k))
+
+    if not orig_chars:
+        return expanded  # 纯英文搜索，不过滤
+
+    kept: list[str] = []
+    for k in expanded:
+        k_chars = set(re.findall(r'[\u4e00-\u9fff]', k))
+        # 必须与原始关键词有至少 1 个共同中文字符
+        if k_chars & orig_chars:
+            kept.append(k)
+    return kept
+
+
+def _build_entries_from_pages(pages: list[dict], texts: dict[str, str]) -> list[dict]:
+    """Build entry cards from the structured search-result page data."""
+    from urllib.parse import urlparse
+
+    seen: set[str] = set()
+    entries: list[dict] = []
+    for p in pages:
+        url = p.get("pageUrl", "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        hits = p.get("hits", [])
+        if not hits:
+            continue
+        # 过滤：至少有一个命中的关键词不是过于宽泛的短词
+        hit_kws = {h.get("keyword", "") for h in hits}
+        specific = [k for k in hit_kws if len(k) >= 3 or re.search(r'[\u4e00-\u9fff]{2,}', k)]
+        if not specific:
+            continue
+        full_text = texts.get(url, "")
+        summary = _build_structured_summary(hits, full_text)
+        if not summary:
+            continue
+        raw_title = p.get("pageTitle") or ""
+        title = _make_entry_title(raw_title, url, summary)
+        date = p.get("publishedDate", "")
+        entries.append(dict(
+            date=date, title=title, summary=summary,
+            link=url,
+        ))
+    entries.sort(key=lambda e: e["date"] or "", reverse=True)
+    return entries
+
+
+_PROJECT_TERMS = re.compile(r'项目|采购|招标|中标|成交|合同|工程|服务|设备|施工|监理|设计|公告|公示')
+# 干扰项：客服电话、技术支持、联系方式等
+_NOISE_TERMS = re.compile(r'(?:电话|咨询|支持|联系|投诉|监督|地址|邮编|传真|邮箱|客服|热线|工作日|办理|CA|数字证书|登录|注册|密码)')
+
+
+def _pick_best_snippet(hits: list[dict]) -> str:
+    """Select the most informative snippet from all keyword hits on a page,
+    penalizing contact/support boilerplate."""
+    best = ""
+    best_score = 0
+    for h in hits:
+        s = h.get("snippet", "").strip()
+        if not s:
+            continue
+        score = min(len(s), 200)
+        if _PROJECT_TERMS.search(s):
+            score += 100
+        # 重罚干扰项："电话"、"技术支持"、"CA数字证书" 等
+        if _NOISE_TERMS.search(s):
+            score -= 200
+        if score > best_score:
+            best_score = score
+            best = s
+    return best[:200] if best and best_score > 0 else ""
+
+
+# 结构化摘要提取正则
+_BUDGET_RE = re.compile(r'预算(?:金额|总金额)?[：:]\s*(\d[\d.,]*\s*万?\s*元?)')
+_TIME_RE = re.compile(r'(?:预计|拟|计划)采购时间[：:]\s*(\d{4}年\d{1,2}[月日]?)')
+_REQUIRE_RE = re.compile(
+    r'(?:采购(?:需求|内容|概况)|需采购|主要采购)[：:]?\s*(.+?)(?:[。；;]|\n|$)')
+_PHONE_RE = re.compile(r'\b\d{3,4}[-–—]\d{7,8}\b')
+
+
+def _clean_page_text(text: str) -> str:
+    """Strip header/footer noise lines common in Chinese government sites."""
+    lines = text.split('\n')
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # 丢弃纯导航关键词短行
+        if len(stripped) < 12 and re.search(
+            r'^(?:首页|网站|联系|关于|设为|加入|收藏|主办|承办|技术支持|'
+            r'建议|分辨率|浏览器|当前位置|今天是|欢迎|访问|进入|返回|登录|'
+            r'注册|版权所有|All Rights|Copyright|ICP|备案)', stripped):
+            continue
+        # 丢弃联系方式/客服行
+        if re.search(r'(?:技术支持|咨询电话|服务热线|监督电话|投诉电话|'
+                     r'CA\s*数字证书|办理地点|工作日|上午|下午|邮箱|传真|邮编)', stripped):
+            continue
+        # 丢弃纯数字/编号行
+        if re.match(r'^[\d\s.,;\-–—/]+$', stripped):
+            continue
+        # 丢弃电话号码行
+        if _PHONE_RE.search(stripped):
+            continue
+        kept.append(stripped)
+    result = '\n'.join(kept)
+    # 开头剥离字母数字+点号噪音前缀（如 "bee97.19e0bc.1da3 cgyxgk"）
+    result = re.sub(r'^[A-Za-z0-9.\s\-–—_]+(?=[\u4e00-\u9fff])', '', result, count=1)
+    return result
+
+
+def _build_structured_summary(hits: list[dict], full_text: str) -> str:
+    """Extract budget, time, and requirements from full page text.
+    Falls back to full-text excerpt, then best snippet as last resort."""
+    parts: list[str] = []
+
+    if full_text:
+        full_text = _clean_page_text(full_text)
+
+        m = _BUDGET_RE.search(full_text)
+        if m:
+            parts.append(f"预算：{m.group(1)}")
+
+        m = _TIME_RE.search(full_text)
+        if m:
+            parts.append(f"时间：{m.group(1)}")
+
+        m = _REQUIRE_RE.search(full_text)
+        if m:
+            req = m.group(1).strip()
+            if len(req) > 8:
+                parts.append(req[:120])
+
+        # 结构化字段不足 → 取全文前 150 字（已清洗）
+        if len(parts) < 2:
+            clean = re.sub(r'\s+', ' ', full_text).strip()
+            if len(clean) > 20:
+                parts.append(clean[:150])
+
+    # 最后兜底：snippet（已过噪声过滤）
+    if not parts:
+        snippet = _pick_best_snippet(hits)
+        if snippet:
+            parts.append(snippet[:150])
+
+    return " | ".join(parts) if parts else ""
+
+
+def _make_entry_title(raw_title: str, url: str, summary: str = "") -> str:
+    """Extract project/school name from snippet by locating project-related markers,
+    falling back to page title or URL path."""
+    from urllib.parse import urlparse
+
+    if summary:
+        title = _extract_project_title(summary)
+        if title:
+            return title[:60]
+
+    # 原始标题有实质内容且不是站点名才直接用
+    stripped = raw_title.strip()
+    if stripped and len(stripped) >= 6 and not _SITE_NAME_RE.search(stripped):
+        return stripped[:80]
+
+    # 从 URL 路径提取最后一段
+    path = urlparse(url).path.strip("/")
+    if path:
+        segments = path.split("/")
+        last = segments[-1]
+        if "." in last:
+            last = last.rsplit(".", 1)[0]
+        if len(last) >= 4:
+            return last[:80]
+    return stripped or url[:80]
+
+
+# 项目标题提取正则：按优先级排列
+_TITLE_PATTERNS = [
+    # "采购项目名称：xxx" / "项目名称：xxx"
+    re.compile(r'(?:采购)?项目名称[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    # "项目编号：xxx  项目名称：xxx"
+    re.compile(r'项目编号[：:][^。；;\n]*?项目名称[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    # "采购意向：xxx" / "采购需求：xxx"
+    re.compile(r'采购(?:意向|需求|内容)[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    # "XXX项目" / "XXX采购" / "XXX招标" — 往前取到标点或行首
+    re.compile(r'(?:^|[。；;，,、\n])\s*([^。；;，,、\n]{10,60}?(?:项目|采购项目|招标项目|中标|成交|合同))'),
+    # "项目概况\nxxx" — 取下一行
+    re.compile(r'项目概况[：:]?\s*\n?\s*(.+?)(?:[。；;]|\n|$)'),
+    # 兜底：取包含"项目/采购/招标"的前后文
+    re.compile(r'(.{8,50}(?:项目|采购|招标|中标|施工|监理|设备).{0,30})'),
+]
+
+# 站点名标题：形如"XX政府采购网"、"XX人民政府"等，不能当文章标题用
+_SITE_NAME_RE = re.compile(
+    r'(?:政府采购网|采购网|招标网|公共资源|政府门户|人民政府|'
+    r'政务服务平台|政务服务网|交易平台|交易中心|'
+    r'信息网|服务网|门户网站)$')
+
+
+def _extract_project_title(text: str) -> str:
+    """Try to extract a project name from snippet text using known patterns."""
+    for pat in _TITLE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            title = m.group(1).strip()
+            # 去除常见无意义前缀
+            title = re.sub(r'^[：:，,、。；;\s]+', '', title)
+            # 去除字母数字+点号+空格前缀（如 "bee97.19e0bc.1da3 cgyxgk"）
+            title = re.sub(r'^[A-Za-z0-9.\s\-–—_]+(?=[\u4e00-\u9fff])', '', title)
+            title = re.sub(r'[：:，,、。；;\s]+$', '', title)
+            if len(title) >= 8:
+                return title
+    return ""
+
+
+async def sse_summarize(messages: list[dict], pages: list[dict], texts: dict[str, str]):
+    """Stream AI deltas, then parse AI-structured entries (fall back to regex)."""
+    full_text = ""
+    try:
+        async for delta in chat_stream(messages):
+            full_text += delta
+            yield sse_event({"type": "delta", "text": delta})
+
+        ai_overview, ai_entries = parse_ai_entries(full_text)
+        if ai_entries:
+            overview = ai_overview or full_text.strip()
+            entries = ai_entries
+        else:
+            overview = full_text.strip()
+            entries = _build_entries_from_pages(pages, texts)
+
+        yield sse_event({
+            "type": "parsed",
+            "overview": overview,
+            "entries": entries,
+        })
         yield sse_event({"type": "done"})
     except AIError as exc:
         yield sse_event({"type": "error", "message": str(exc)})
@@ -387,7 +662,7 @@ async def create_job(req: JobRequest) -> dict:
         schedule = validate_schedule(req.schedule)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    job = make_job(req.startUrl, req.keywords, req.depth, req.render,
+    job = make_job(req.startUrl, req.keywords, req.render,
                    schedule, name=req.name.strip())
     job_store.add(job)
     return {"job": _job_view(job)}
@@ -444,7 +719,7 @@ async def summarize(req: AIRequest) -> StreamingResponse:
     result = entry["result"]
     all_kw = result["keywords"] + result.get("expandedKeywords", [])
     messages = summarize_prompt(all_kw, result["results"])
-    return StreamingResponse(sse_stream(messages),
+    return StreamingResponse(sse_summarize(messages, result["results"], entry["texts"]),
                              media_type="text/event-stream")
 
 

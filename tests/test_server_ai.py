@@ -108,3 +108,55 @@ def test_ask_streams_and_validates(monkeypatch, site_server):
                                          "question": "  "}).status_code == 422
     assert client.post("/api/ask", json={"searchId": "nope",
                                          "question": "x"}).status_code == 404
+
+
+from ai import parse_ai_entries
+
+
+def test_parse_ai_entries_used_in_sse(monkeypatch, site_server):
+    """当 AI 输出合法结构化格式时，parsed 事件应包含 AI 生成的条目。"""
+    monkeypatch.setattr(server, "expand_keywords", _no_expand)
+
+    ai_text = """【概述】
+测试概述。
+
+【条目】
+[2025-01-15]《AI生成的标题》
+AI生成的摘要。
+https://example.com/page
+"""
+
+    async def fake_stream(messages):
+        for ch in ai_text:
+            yield ch
+
+    monkeypatch.setattr(server, "chat_stream", fake_stream)
+
+    sid = search(site_server, ["alpha"]).json()["searchId"]
+    resp = client.post("/api/summarize", json={"searchId": sid})
+    assert resp.status_code == 200
+
+    text = resp.text
+    assert '"type": "parsed"' in text
+    assert "AI生成的标题" in text
+    assert "AI生成的摘要" in text
+
+
+def test_parse_ai_entries_fallback(monkeypatch, site_server):
+    """当 AI 输出不含结构化标记时，parsed 事件回退到正则提取的条目。"""
+    monkeypatch.setattr(server, "expand_keywords", _no_expand)
+
+    ai_text = "这是一段纯文本，没有结构化标记，应该是overview。"
+
+    async def fake_stream(messages):
+        for ch in ai_text:
+            yield ch
+
+    monkeypatch.setattr(server, "chat_stream", fake_stream)
+
+    sid = search(site_server, ["alpha"]).json()["searchId"]
+    resp = client.post("/api/summarize", json={"searchId": sid})
+    assert resp.status_code == 200
+    text = resp.text
+    assert '"type": "parsed"' in text
+    assert "AI生成" not in text
