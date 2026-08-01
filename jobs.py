@@ -581,7 +581,7 @@ async def run_job(store: JobStore, job_id: str,
             overview_result = await _generate_job_ai_summary(
                 all_keywords, new_results)
             if overview_result:
-                entries = _build_job_summary_entries(
+                entries = overview_result["entries"] or _build_job_summary_entries(
                     new_results, crawl_result.pages)
                 ai_summary = {
                     "overview": overview_result["overview"],
