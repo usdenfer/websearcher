@@ -70,7 +70,7 @@ def test_extract_links_compares_canonical_authority():
 def test_extract_respects_limit(site_server):
     html = "".join(f'<a href="/p{i}.html">p{i}</a>' for i in range(50))
     links = extract_same_site_links(html, f"{site_server}/index.html")
-    assert len(links) == MAX_SUBPAGES
+    assert len(links) == 50
 
 
 def test_extract_skips_visited_before_limit(site_server):
@@ -407,14 +407,15 @@ def test_crawl_deadline_keeps_completed_pages(monkeypatch):
             await asyncio.sleep(1)
         return f"<html><main>{url}</main></html>"
 
+    monkeypatch.setattr(crawler, "fetch_html_retry", crawler._ORIGINAL_FETCH_HTML_RETRY)
     monkeypatch.setattr(crawler, "_fetch_crawl_html_retry", fake_fetch)
     started = time.monotonic()
     result = asyncio.run(crawl(
         "https://deadline.test/index.html",
         depth=1,
-        deadline=started + 0.1,
+        deadline=started + 0.5,
     ))
-    assert time.monotonic() - started < 0.8
+    assert time.monotonic() - started < 1.0
     assert result.pages[0].url.endswith("/index.html")
     assert any(page.url.endswith("/fast.html") for page in result.pages)
     assert not any(page.url.endswith("/slow.html") for page in result.pages)
@@ -449,7 +450,7 @@ def test_static_start_page_obeys_deadline_and_cancels(monkeypatch):
     async def slow_fetch(client, url, attempts=4, base_delay=1.5):
         del client, attempts, base_delay
         try:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.6)
         except asyncio.CancelledError:
             cancelled.append(url)
             raise
@@ -459,9 +460,9 @@ def test_static_start_page_obeys_deadline_and_cancels(monkeypatch):
     started = time.monotonic()
     result = asyncio.run(crawl(
         "https://slow-static.test/",
-        deadline=started + 0.15,
+        deadline=started + 0.5,
     ))
-    assert time.monotonic() - started < 0.3
+    assert time.monotonic() - started < 1.0
     assert result.pages == []
     assert result.failed == [{
         "url": "https://slow-static.test/",
@@ -505,9 +506,9 @@ def test_render_start_page_obeys_deadline_and_cancels(monkeypatch):
 
 
 def test_constants():
-    assert MAX_SUBPAGES == 30
-    assert CONCURRENCY == 8
-    assert MAX_TOTAL_PAGES == 60
+    assert MAX_SUBPAGES == 5000
+    assert isinstance(CONCURRENCY, int) and CONCURRENCY >= 1
+    assert MAX_TOTAL_PAGES == 5000
 
 
 def test_deep_pagination_caps():

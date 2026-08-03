@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from urllib.parse import urlsplit
 
 import httpx
@@ -55,22 +56,34 @@ def _sanitize_url(url: str) -> str:
     return f"{scheme}://{display_host}{port_suffix}{path or '/'}"
 
 
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, ""))
+    except (ValueError, TypeError):
+        return default
+
+
 class DiscoveryFetcher:
     def __init__(
         self,
         client: httpx.AsyncClient,
         budget: BudgetManager,
         stats: DiscoveryStats,
-        concurrency: int = 8,
-        per_host_concurrency: int = 4,
+        concurrency: int | None = None,
+        per_host_concurrency: int | None = None,
         policy: DomainPolicy | None = None,
     ):
+        if concurrency is None:
+            concurrency = _env_int("DISCOVERY_CONCURRENCY", 6)
+        if per_host_concurrency is None:
+            per_host_concurrency = _env_int("MAX_PER_HOST_CONCURRENCY", 3)
         self.client = client
         self.budget = budget
         self.stats = stats
         self.semaphore = asyncio.Semaphore(concurrency)
         self.per_host_concurrency = per_host_concurrency
         self.policy = policy
+        self._rate_limiter = None
         self.host_semaphores: dict[
             tuple[str, int | None], asyncio.Semaphore
         ] = {}
@@ -86,18 +99,26 @@ class DiscoveryFetcher:
         self.stats.partial = True
         return False
 
+    async def _ensure_rate_limiter(self) -> None:
+        if self._rate_limiter is not None:
+            return
+        from discovery.ratelimit import get_rate_limiter
+        self._rate_limiter = await get_rate_limiter()
+
     def _allowed(self, url: str) -> bool:
         return self.policy is None or url_allowed(url, self.policy)
 
     async def fetch_html_page(self, url: str) -> FetchedHtml | None:
         if not self._allowed(url):
             return None
+        await self._ensure_rate_limiter()
         async with self.semaphore, self.host_semaphore(url):
             try:
                 remaining = self.budget.remaining_seconds()
                 if remaining <= 0:
                     self.stats.partial = True
                     return None
+                await self._rate_limiter.wait(url)
                 async with asyncio.timeout(remaining):
                     parameters = inspect.signature(
                         fetch_html_retry
@@ -144,6 +165,8 @@ class DiscoveryFetcher:
                     f"{_sanitize_url(url)}: 非 HTML 内容"
                 )
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
+                    await self._rate_limiter.report_rate_limited(url)
                 self.stats.warnings.append(
                     f"{_sanitize_url(url)}: {type(exc).__name__}"
                 )
@@ -156,6 +179,7 @@ class DiscoveryFetcher:
     async def fetch_rendered_page(self, url: str):
         if not self._allowed(url):
             return None
+        await self._ensure_rate_limiter()
         async with self.semaphore, self.host_semaphore(url):
             try:
                 import renderer
@@ -163,6 +187,7 @@ class DiscoveryFetcher:
                 if remaining <= 0:
                     self.stats.partial = True
                     return None
+                await self._rate_limiter.wait(url)
                 async with asyncio.timeout(remaining):
                     if self.policy is not None:
                         result = await renderer.render_page_result(

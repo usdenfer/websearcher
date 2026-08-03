@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,14 +18,14 @@ from discovery.urltools import (
     same_site_boundary,
 )
 
-MAX_SUBPAGES = 30
-MAX_TOTAL_PAGES = 60
-RENDER_MAX_PAGES = 60
-RENDER_SUBPAGE_LINKS = 60
+MAX_SUBPAGES = 5000
+MAX_TOTAL_PAGES = 5000
+RENDER_MAX_PAGES = 5000
+RENDER_SUBPAGE_LINKS = 5000
 RENDER_DISCOVERY_HUBS = 2
 RENDER_DISCOVERY_ARTICLES_PER_HUB = 24
-CONCURRENCY = 8
-PAGE_TIMEOUT = 10.0
+CONCURRENCY = int(os.environ.get("BFS_CONCURRENCY", "6"))
+PAGE_TIMEOUT = 15.0
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -261,7 +262,7 @@ async def _fetch_html_manual_redirect(
 async def _fetch_crawl_html_retry(
     client: _CrawlHttpContext,
     url: str,
-    attempts: int = 4,
+    attempts: int = 6,
     base_delay: float = 1.5,
 ) -> FetchedHtml:
     """Crawl-only retry path with redirect validation before each next hop."""
@@ -283,7 +284,7 @@ async def _fetch_crawl_html_retry(
 
 
 async def fetch_html_retry(client: httpx.AsyncClient, url: str,
-                           attempts: int = 4,
+                           attempts: int = 6,
                            base_delay: float = 1.5,
                            include_final_url: bool = False,
                            reserve_request: Callable[[], bool] | None = None,
@@ -535,6 +536,7 @@ async def crawl(start_url: str, depth: int = 1,
             if not candidates:
                 break
             attempted_pages += len(candidates)
+            await asyncio.sleep(0.5)
             fetched, deadline_reached = await gather_before_deadline(
                 (fetch_one(u) for u in candidates),
                 deadline,

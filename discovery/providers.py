@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -17,7 +18,7 @@ from urllib.parse import (
 
 import httpx
 
-from discovery.adapters import FreeCmsAdapter, YunnanCmsAdapter
+from discovery.adapters import FreeCmsAdapter, YngpAdapter, YunnanCmsAdapter
 from discovery.models import (
     BudgetManager,
     Candidate,
@@ -36,6 +37,14 @@ from discovery.urltools import normalize_candidate_url, url_allowed
 from matcher import looks_js_driven
 
 
+def _provider_delay_seconds() -> float:
+    try:
+        ms = float(os.environ.get("PROVIDER_REQUEST_DELAY_MS", "1000").strip())
+        return max(ms / 1000.0, 0.0)
+    except (ValueError, TypeError):
+        return 1.0
+
+
 class Provider:
     source = "unknown"
 
@@ -50,12 +59,19 @@ class Provider:
         self.budget = budget
         self.stats = stats
         self.policy = policy
+        self._rate_limiter = None
+
+    async def _ensure_rate_limiter(self) -> None:
+        if self._rate_limiter is not None:
+            return
+        from discovery.ratelimit import get_rate_limiter
+        self._rate_limiter = await get_rate_limiter()
 
     async def get_text(
         self,
         url: str,
         *,
-        limit: int = 10,
+        limit: int = 500,
         params: dict | None = None,
         counts_as_html: bool = True,
         source: str | None = None,
@@ -96,6 +112,8 @@ class Provider:
                 self.stats.partial = True
                 return None
 
+            await self._ensure_rate_limiter()
+            await self._rate_limiter.wait(current_url)
             try:
                 async with asyncio.timeout(remaining):
                     response = await self.client.get(
@@ -145,6 +163,15 @@ class Provider:
 
             try:
                 response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (429, 503):
+                    await self._rate_limiter.report_rate_limited(
+                        current_url or str(response.url)
+                    )
+                self.stats.warnings.append(
+                    f"{source}: {type(exc).__name__}"
+                )
+                return None
             except Exception as exc:
                 self.stats.warnings.append(
                     f"{source}: {type(exc).__name__}"
@@ -178,7 +205,7 @@ class SearchProvider(Provider):
             for keyword in keywords[:6]:
                 loaded = await self.get_text(
                     spec.url,
-                    limit=10,
+                    limit=500,
                     params=spec.params_for(keyword),
                     source=spec.source,
                 )
@@ -217,12 +244,12 @@ class SearchProvider(Provider):
 
                 process_page(html, final_url)
                 additional_requests = 0
-                while page_queue and additional_requests < 9:
+                while page_queue and additional_requests < 500:
                     page_url = page_queue.popleft()
                     additional_requests += 1
                     page = await self.get_text(
                         page_url,
-                        limit=10,
+                        limit=500,
                         source=spec.source,
                     )
                     if page is None:
@@ -260,18 +287,18 @@ class SitemapProvider(Provider):
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         loaded = await self.get_text(
             self.origin + "/sitemap.xml",
-            limit=5,
+            limit=100,
             counts_as_html=False,
         )
         if loaded is None:
             return []
         body, _final_url = loaded
-        child_urls = parse_sitemap_index(body, self.policy)[:4]
+        child_urls = parse_sitemap_index(body, self.policy)
         urls = [] if child_urls else parse_sitemap(body, self.policy)
         for child_url in child_urls:
             child = await self.get_text(
                 child_url,
-                limit=5,
+                limit=100,
                 counts_as_html=False,
             )
             if child is not None:
@@ -300,10 +327,10 @@ class FeedProvider(Provider):
     async def discover(self, keywords: list[str]) -> list[Candidate]:
         result: list[Candidate] = []
         seen: set[str] = set()
-        for url in self.feed_urls[:5]:
+        for url in self.feed_urls:
             loaded = await self.get_text(
                 url,
-                limit=5,
+                limit=100,
                 counts_as_html=False,
             )
             if loaded is None:
@@ -340,12 +367,12 @@ class CategoryProvider(Provider):
         visited_pages: set[str] = set()
         additional_requests = 0
         keyword = keywords[0] if keywords else ""
-        for url in self.category_urls[:8]:
+        for url in self.category_urls:
             normalized_root = normalize_candidate_url(url)
             if not normalized_root or normalized_root in visited_pages:
                 continue
             visited_pages.add(normalized_root)
-            loaded = await self.get_text(url, limit=20)
+            loaded = await self.get_text(url, limit=500)
             if loaded is None:
                 continue
             body, final_url = loaded
@@ -452,14 +479,14 @@ class CategoryProvider(Provider):
                     self._append_candidates(
                         result, seen, rendered_candidates
                     )
-            while page_queue and additional_requests < 12:
+            while page_queue and additional_requests < 500:
                 page_url = page_queue.popleft()
                 queued_pages.discard(page_url)
                 if page_url in visited_pages:
                     continue
                 visited_pages.add(page_url)
                 additional_requests += 1
-                page = await self.get_text(page_url, limit=20)
+                page = await self.get_text(page_url, limit=500)
                 if page is None:
                     continue
                 page_body, page_final_url = page
@@ -515,7 +542,7 @@ class FreeCmsApiProvider(Provider):
         adapter: FreeCmsAdapter,
         *,
         today: date | None = None,
-        max_pages_per_keyword: int = 10,
+        max_pages_per_keyword: int = 100,
     ):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
@@ -655,8 +682,9 @@ class FreeCmsApiProvider(Provider):
                             ),
                             source_evidence=(self.source,),
                         )
-                    )
+                        )
 
+                await asyncio.sleep(_provider_delay_seconds())
                 if page == self.max_pages_per_keyword:
                     self.stats.note_stop("provider-page-limit")
                 if dates_nonincreasing and page_has_expired_date:
@@ -688,7 +716,7 @@ class FreeCmsRecentProvider(Provider):
         adapter: FreeCmsAdapter,
         *,
         today: date | None = None,
-        max_pages: int = 80,
+        max_pages: int = 500,
         browser_loader_factory=None,
     ):
         super().__init__(client, budget, stats, policy)
@@ -721,6 +749,7 @@ class FreeCmsRecentProvider(Provider):
                 self.stats.partial = True
                 self.stats.note_stop("time-budget")
                 break
+            await asyncio.sleep(_provider_delay_seconds())
             loaded = await load_page(page)
             if loaded is None:
                 if self.budget.expired():
@@ -1054,7 +1083,8 @@ class YunnanCmsProvider(Provider):
                 continue
             if total == 0:
                 continue
-            for page_no in range(1, 11):
+            for page_no in range(1, 21):
+                await asyncio.sleep(_provider_delay_seconds())
                 loaded = await self.get_text(
                     self.adapter.origin + "/searchN.aspx",
                     limit=10,
@@ -1086,3 +1116,355 @@ class YunnanCmsProvider(Provider):
         else:
             self.stats.sources_succeeded.discard(self.source)
         return result
+
+
+class YngpProvider(Provider):
+    """云南省政府采购网采购公告接口（bootgrid AJAX）。
+
+    服务端要求先按浏览器加载列表页的顺序建立会话（取列表页 → 调行政区
+    划接口），否则公告接口只返回空 data；第 2 页起和 rowCount≠10 的请
+    求需要滑块验证码，因此每个时间窗只取第一页（最新 10 条），用
+    query_startTime/query_endTime 切窗代替翻页：窗口 total ≤ 10 时第
+    一页即全部，total > 10 时对半细分。不传 query_type 时服务端只返
+    回采购意向（默认 sign=23），所以逐类别查询。
+    """
+
+    source = "yngp-api"
+
+    # 列表页核心栏目：采购意向公开、招标/预审/谈判/磋商/询价公告
+    DEFAULT_QUERY_TYPES = ("23", "1")
+
+    # 类别关键词 → query_type 映射。当用户搜索的关键词恰好是类别名称时，
+    # 对该类别不应再用该关键词过滤标题，应拉取全部近 N 天公告由正文匹配筛选。
+    CATEGORY_KEYWORD_MAP: dict[str, str] = {
+        "采购意向公开": "23",
+        "采购意向": "23",
+        "意向公开": "23",
+        "招标公告": "1",
+        "招标": "1",
+        "单一来源公示": "3",
+        "单一来源": "3",
+        "结果公告": "2",
+        "更正公告": "4",
+        "废标公告": "5",
+        "合同公告": "8",
+        "验收公告": "7",
+    }
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        budget: BudgetManager,
+        stats: DiscoveryStats,
+        policy: DomainPolicy,
+        adapter: YngpAdapter,
+        *,
+        today: date | None = None,
+        query_types: tuple[str, ...] = DEFAULT_QUERY_TYPES,
+        recent_days: int = 30,
+        max_windows_per_query: int = 12,
+    ):
+        super().__init__(client, budget, stats, policy)
+        self.adapter = adapter
+        self.today = today or date.today()
+        self.query_types = query_types
+        self.recent_days = recent_days
+        # 单个（关键字 × 类别）组合允许的最大时间窗请求数
+        self.max_windows_per_query = max_windows_per_query
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Origin": self.adapter.origin,
+            "Referer": self.adapter.list_url,
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": (
+                "application/x-www-form-urlencoded; charset=UTF-8"
+            ),
+        }
+
+    async def _warm_session(self) -> None:
+        """复刻浏览器打开列表页时的请求序列，建立可用会话。"""
+        remaining = self.budget.remaining_seconds()
+        if remaining <= 0:
+            self.stats.partial = True
+            return
+        try:
+            async with asyncio.timeout(remaining):
+                await self.client.get(
+                    self.adapter.list_url,
+                    headers={"Referer": self.adapter.origin + "/"},
+                )
+                await self.client.post(
+                    self.adapter.warm_url,
+                    content="",
+                    headers=self._headers(),
+                )
+        except TimeoutError:
+            self.stats.partial = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.stats.warnings.append(
+                f"{self.source}: session warm {type(exc).__name__}"
+            )
+
+    async def _post_api(
+        self,
+        keyword: str,
+        query_type: str,
+        start: date,
+        end: date,
+        limit: int,
+    ) -> str | None:
+        self.stats.sources_tried.add(self.source)
+        last_error: Exception | None = None
+        # 站点偶尔重置连接，失败时重试一次
+        for _attempt in range(2):
+            remaining = self.budget.remaining_seconds()
+            if remaining <= 0:
+                self.stats.partial = True
+                return None
+            if not self.budget.reserve_provider(self.source, limit):
+                return None
+            try:
+                async with asyncio.timeout(remaining):
+                    response = await self.client.post(
+                        self.adapter.api_url,
+                        params={"captchaCheckFlag": "0", "p": 1},
+                        data={
+                            "current": 1,
+                            "rowCount": 10,
+                            "searchPhrase": "",
+                            "query_bulletintitle": keyword,
+                            "query_type": query_type,
+                            "query_startTime": start.isoformat(),
+                            "query_endTime": end.isoformat(),
+                        },
+                        headers=self._headers(),
+                    )
+            except TimeoutError:
+                self.stats.partial = True
+                return None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                continue
+            try:
+                response.raise_for_status()
+            except Exception as exc:
+                self.stats.warnings.append(
+                    f"{self.source}: {type(exc).__name__}"
+                )
+                return None
+            self.stats.sources_succeeded.add(self.source)
+            return response.text
+        self.stats.warnings.append(
+            f"{self.source}: {type(last_error).__name__}"
+        )
+        return None
+
+    async def discover(self, keywords: list[str]) -> list[Candidate]:
+        result: list[Candidate] = []
+        seen: set[str] = set()
+        source_was_successful = (
+            self.source in self.stats.sources_succeeded
+        )
+        business_success = False
+        selected_keywords = keywords[:6]
+        request_limit = (
+            (len(selected_keywords) + 1)
+            * len(self.query_types)
+            * self.max_windows_per_query
+        )
+        await self._warm_session()
+        if self.budget.expired():
+            self.stats.partial = True
+            self.stats.note_stop("time-budget")
+            return result
+
+        # 至少保留 8 秒给候选页抓取，其余时间全力搜索
+        _FETCH_RESERVE_SECONDS = 8
+
+        # 记录哪些 query_type 已经被某个类别关键词"全量拉取"过，
+        # 后续无关键词全量补拉时跳过，避免重复
+        unfiltered_types_covered: set[str] = set()
+
+        for keyword in selected_keywords:
+            for query_type in self.query_types:
+                if self.budget.expired():
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                    break
+                if self.budget.remaining_seconds() < _FETCH_RESERVE_SECONDS:
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                    break
+                window_success = await self._collect_recent(
+                    keyword, query_type, request_limit, result, seen
+                )
+                business_success = business_success or window_success
+                # 如果该关键词是该类别的类别名，_collect_recent 已用
+                # effective_keyword="" 全量拉取，标记跳过
+                if self.CATEGORY_KEYWORD_MAP.get(keyword) == query_type:
+                    unfiltered_types_covered.add(query_type)
+
+        # 全量补拉：对未被类别关键词覆盖的 query_type，
+        # 以关键词="" 拉取全部近期公告，交给正文匹配发现标题外命中
+        # 先重新预热会话，避免长时间关键词筛选后会话过期
+        await self._warm_session()
+        for query_type in self.query_types:
+            if query_type in unfiltered_types_covered:
+                continue
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                break
+            if self.budget.remaining_seconds() < _FETCH_RESERVE_SECONDS:
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                break
+            window_success = await self._collect_recent(
+                "", query_type, request_limit, result, seen
+            )
+            business_success = business_success or window_success
+
+        if source_was_successful or business_success:
+            self.stats.sources_succeeded.add(self.source)
+        else:
+            self.stats.sources_succeeded.discard(self.source)
+        if not business_success:
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+            else:
+                self.stats.note_stop("channel-failure")
+        return result
+
+    async def _collect_recent(
+        self,
+        keyword: str,
+        query_type: str,
+        limit: int,
+        result: list[Candidate],
+        seen: set[str],
+    ) -> bool:
+        """用时间窗分片代替翻页，收集最近 recent_days 天的公告。
+
+        接口第 2 页起要滑块验证码，但时间范围过滤不受限：窗口
+        total ≤ 10 时第一页就是全部；total > 10 时对半细分直到每片
+        都能被一页装下。优先处理较新的窗口。
+        """
+        business_success = False
+        cutoff = self.today - timedelta(days=self.recent_days)
+        stack = [(cutoff, self.today)]
+        queries = 0
+        overflow_warned = False
+        # 余量不足时提前退出，给候选页抓取留出时间
+        _FETCH_RESERVE_SECONDS = 5
+        while stack:
+            if self.budget.expired():
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                break
+            if queries >= self.max_windows_per_query:
+                self.stats.note_stop("provider-page-limit")
+                break
+            if self.budget.remaining_seconds() < _FETCH_RESERVE_SECONDS:
+                self.stats.partial = True
+                self.stats.note_stop("time-budget")
+                break
+            win_start, win_end = stack.pop()
+            queries += 1
+            # 当关键词本身是类别名时，对该类别不按标题过滤，
+            # 拉取全部近 N 天公告，交给正文匹配阶段筛选。
+            effective_keyword = (
+                ""
+                if self.CATEGORY_KEYWORD_MAP.get(keyword) == query_type
+                else keyword
+            )
+            body = await self._post_api(
+                effective_keyword, query_type, win_start, win_end, limit
+            )
+            if body is None:
+                if self.budget.expired():
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                continue
+            ok, total, rows, warning = self.adapter.parse_api_response(
+                body
+            )
+            if not ok:
+                self.stats.warnings.append(f"{self.source}: {warning}")
+                continue
+            business_success = True
+            if (
+                total is not None
+                and total > len(rows)
+                and win_start < win_end
+            ):
+                mid = win_start + (win_end - win_start) // 2
+                # 栈后进先出：较新的半边先处理
+                stack.append((win_start, mid))
+                stack.append((mid + timedelta(days=1), win_end))
+                continue
+            if (
+                total is not None
+                and total > len(rows)
+                and not overflow_warned
+            ):
+                overflow_warned = True
+                self.stats.warnings.append(
+                    f"{self.source}: 单日公告超过 10 条，"
+                    "超出部分未获取"
+                )
+            self._append_rows(rows, keyword, cutoff, result, seen)
+        return business_success
+
+    def _append_rows(
+        self,
+        rows: list[dict],
+        keyword: str,
+        cutoff: date,
+        result: list[Candidate],
+        seen: set[str],
+    ) -> None:
+        for row in rows:
+            raw_date = row.get("finishday")
+            published: date | None = None
+            if raw_date is not None:
+                try:
+                    published = date.fromisoformat(str(raw_date)[:10])
+                except ValueError:
+                    pass
+            if published is not None and published < cutoff:
+                continue
+            raw_url = self.adapter.detail_url(row)
+            if not raw_url:
+                continue
+            candidate_url = normalize_candidate_url(raw_url)
+            if (
+                not candidate_url
+                or candidate_url in seen
+                or not url_allowed(candidate_url, self.policy)
+            ):
+                continue
+            seen.add(candidate_url)
+            if published is None:
+                self.stats.unknown_date_candidates += 1
+            title = str(row.get("bulletintitle") or "")
+            result.append(
+                Candidate(
+                    candidate_url,
+                    self.source,
+                    keyword,
+                    title,
+                    100 if keyword.lower() in title.lower() else 75,
+                    published_date=(
+                        published.isoformat()
+                        if published is not None
+                        else None
+                    ),
+                    source_evidence=(self.source,),
+                )
+            )
