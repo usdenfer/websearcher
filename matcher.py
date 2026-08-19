@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 from urllib.parse import quote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Comment
@@ -17,7 +17,9 @@ SKIP_TEXT_PARENTS = {"script", "style", "noscript", "a", "title"}
 NOISE_SELECTORS = (
     "script, style, noscript, nav, header, footer, aside, "
     "[hidden], [aria-hidden='true'], .nav, .navbar, .footer, "
-    ".sidebar, .advert, .ad, .login"
+    ".sidebar, .advert, .ad, .login, "
+    ".top, .banner, .crumbs, .breadcrumb, .location, .path, "
+    ".toolbar, .share, .related, .recommend, .hot, .links"
 )
 MAIN_CONTENT_SELECTORS = (
     "article",
@@ -27,6 +29,19 @@ MAIN_CONTENT_SELECTORS = (
     ".content-main",
     ".article_body",
     ".detail-content",
+    ".detail",
+    ".info-detail",
+    ".article-detail",
+    ".news-content",
+    ".bulletin-content",
+    ".con_text",
+    ".text_content",
+    ".info_content",
+    ".content_box",
+    "#content",
+    "#detail",
+    "#mainContent",
+    "#article",
 )
 
 
@@ -59,18 +74,150 @@ def extract_title(html: str) -> str:
     return ""
 
 
+_DATE_FORMATS = [
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+]
+
+_META_DATE_NAMES = {
+    "article:published_time", "date", "pubdate", "dc.date",
+    "citation_date", "dc.date.issued", "dcterms.issued",
+    "publish-date", "release_date",
+}
+
+_URL_DATE_RE = re.compile(
+    r'/(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?[/.]'
+)
+_URL_DATE_FILE_RE = re.compile(
+    r'(?:[^0-9]|^)(\d{4})(\d{2})(\d{2})(?:\d{2,})?(?:\D|$)'
+)
+_CHINESE_DATE_RE = re.compile(
+    r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日'
+)
+_ISO_DATE_BODY_RE = re.compile(
+    r'(?:[^\d]|^)(\d{4})-(\d{1,2})-(\d{1,2})(?:[^\d]|$)'
+)
+_PUBLISH_LABEL_DATE_RE = re.compile(
+    r'(?:发布|发表|上传|更新|录入)时间[：:]\s*(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})'
+)
+_PUBLISH_LABEL_FULL_RE = re.compile(
+    r'(?:发布|发表|上传|更新|录入)时间[：:]\s*'
+    r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日'
+)
+
+
+def _try_parse_date(value: str) -> str | None:
+    value = value.strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(value[:19], fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(value.strip()).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _parse_url_date(url: str) -> str | None:
+    m = _URL_DATE_RE.search(url)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        day = int(m.group(3)) if m.group(3) else 1
+        try:
+            return datetime(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+    m = _URL_DATE_FILE_RE.search(url)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)),
+                            int(m.group(3))).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_body_date(text: str) -> str | None:
+    def _make_date(y, m, d):
+        try:
+            return datetime(int(y), int(m), int(d)).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    m = _PUBLISH_LABEL_FULL_RE.search(text)
+    if m:
+        return _make_date(m.group(1), m.group(2), m.group(3))
+    m = _PUBLISH_LABEL_DATE_RE.search(text)
+    if m:
+        return _make_date(m.group(1), m.group(2), m.group(3))
+    m = _CHINESE_DATE_RE.search(text)
+    if m:
+        return _make_date(m.group(1), m.group(2), m.group(3))
+    m = _ISO_DATE_BODY_RE.search(text)
+    if m:
+        return _make_date(m.group(1), m.group(2), m.group(3))
+    return None
+
+
+def extract_published_date(html: str, url: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for meta in soup.find_all("meta"):
+        name = (meta.get("name") or "").lower()
+        prop = (meta.get("property") or "").lower()
+        if name in _META_DATE_NAMES or prop in _META_DATE_NAMES:
+            content = meta.get("content")
+            if content:
+                parsed = _try_parse_date(content.strip())
+                if parsed:
+                    return parsed
+
+    for time_el in soup.find_all("time"):
+        dt = time_el.get("datetime") or time_el.get("content")
+        if dt:
+            parsed = _try_parse_date(dt.strip())
+            if parsed:
+                return parsed
+
+    parsed = _parse_url_date(url)
+    if parsed:
+        return parsed
+
+    for el in soup.find_all(
+        attrs={"class": re.compile(r'(?:time|date|pub|publish)',
+                                   re.IGNORECASE)}
+    ):
+        text = _node_text(el)
+        if text:
+            parsed = _parse_body_date(text)
+            if parsed:
+                return parsed
+
+    body_text = _node_text(soup.body) if soup.body else ""
+    parsed = _parse_body_date(body_text)
+    if parsed:
+        return parsed
+
+    return None
+
+
 def match_page(html: str, page_url: str, keywords: list[str]) -> list[Hit]:
+    """Match keywords against all visible text and element attributes."""
     soup = BeautifulSoup(html, "html.parser")
     keywords = [k for k in keywords if k.strip()]
     hits: list[Hit] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
 
     def add(kind: str, raw_text: str, keyword: str,
             link_href: str | None = None) -> None:
         snippet = make_snippet(raw_text, keyword)
         if snippet is None:
             return
-        key = (kind, snippet)
+        key = (kind, snippet, keyword)
         if key in seen:
             return
         seen.add(key)
@@ -201,7 +348,7 @@ def extract_main_text(html: str) -> str:
 def match_body_page(
     html: str, page_url: str, keywords: list[str],
 ) -> list[Hit]:
-    """Match keywords only against the extracted article body."""
+    """Match keywords against the extracted article body (OR logic)."""
     text = extract_main_text(html)
     result: list[Hit] = []
     for keyword in dict.fromkeys(k.strip() for k in keywords if k.strip()):
@@ -215,6 +362,91 @@ def match_body_page(
             href=f"{page_url}#:~:text={quote(keyword)}",
         ))
     return result
+
+
+_TITLE_PATTERNS = [
+    re.compile(r'(?:采购)?项目名称[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    re.compile(r'项目编号[：:][^。；;\n]*?项目名称[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    re.compile(r'采购(?:意向|需求|内容)[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    re.compile(r'(?:公告|公示)\s*标题[：:]\s*(.+?)(?:[。；;]|\n|$)'),
+    re.compile(r'(?:^|[。；;，,、\n])\s*'
+               r'([^。；;，,、\n]{10,60}?(?:项目|采购项目|招标项目|中标|成交|合同))'),
+    re.compile(r'项目概况[：:]?\s*\n?\s*(.+?)(?:[。；;]|\n|$)'),
+    re.compile(r'(.{8,50}(?:项目|采购|招标|中标|施工|监理|设备).{0,30})'),
+    re.compile(r'((?:招标|采购|中标|成交|合同)\s*公告)'),
+    re.compile(r'(?:^|[。；;，,、\n])\s*'
+               r'([^。；;，,、\n]{8,60}?(?:公告|公示|通知))'),
+    re.compile(r'^(.{8,60}?(?:公告|公示|通知))'),
+]
+
+_SITE_NAME_RE = re.compile(
+    r'(?:政府采购网|采购网|招标网|公共资源|政府门户|人民政府|'
+    r'政务服务平台|政务服务网|交易平台|交易中心|'
+    r'信息网|服务网|门户网站)$')
+
+
+def _extract_project_title(text: str) -> str:
+    for pat in _TITLE_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        try:
+            title = m.group(1).strip()
+        except IndexError:
+            continue
+        title = re.sub(r'^[：:，,、。；;\s]+', '', title)
+        title = re.sub(r'^[A-Za-z0-9.\s\-–—_]+(?=[\u4e00-\u9fff])',
+                       '', title)
+        title = re.sub(r'[：:，,、。；;\s]+$', '', title)
+        if len(title) >= 8:
+            return title
+    return ""
+
+
+def _clean_page_title(page_title: str) -> str:
+    title = re.sub(r'\s*[-–—_|｜]\s*.+$', '', page_title.strip())
+    if len(title) < 4:
+        return page_title.strip()
+    return title
+
+
+def extract_display_title(html: str, page_title: str, url: str) -> str:
+    cleaned_pt = _clean_page_title(page_title)
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(['h1', 'h2', 'h3']):
+        text = _node_text(tag)
+        if text and len(text) >= 8:
+            title = _extract_project_title(text)
+            if title and len(title) >= 8:
+                return title[:60]
+
+    main_text = extract_main_text(html)
+    if main_text and len(main_text) >= 40:
+        title = _extract_project_title(main_text)
+        if title and len(title) >= 8:
+            if (cleaned_pt and len(cleaned_pt) >= 8
+                    and title in cleaned_pt):
+                return cleaned_pt[:80]
+            return title[:60]
+
+    pt_title = _extract_project_title(cleaned_pt)
+    if pt_title:
+        return pt_title[:60]
+
+    if (cleaned_pt and len(cleaned_pt) >= 8
+            and not _SITE_NAME_RE.search(cleaned_pt)):
+        return cleaned_pt[:80]
+
+    path = urlsplit(url).path.strip("/")
+    if path:
+        segments = path.split("/")
+        last = segments[-1]
+        if "." in last:
+            last = last.rsplit(".", 1)[0]
+        if len(last) >= 4:
+            return last[:80]
+    return cleaned_pt or url[:80]
 
 
 _JS_DRIVEN_RE = re.compile(
@@ -242,6 +474,9 @@ def match_crawl_result(pages, keywords: list[str]) -> tuple[list[dict], int]:
         results.append({
             "pageUrl": page.url,
             "pageTitle": extract_title(page.html),
+            "displayTitle": extract_display_title(
+                page.html, extract_title(page.html), page.url),
+            "publishedDate": extract_published_date(page.html, page.url),
             "hits": [asdict(h) for h in hits],
         })
     return results, total_hits
@@ -261,6 +496,9 @@ def match_body_crawl_result(
         results.append({
             "pageUrl": page.url,
             "pageTitle": extract_title(page.html),
+            "displayTitle": extract_display_title(
+                page.html, extract_title(page.html), page.url),
+            "publishedDate": extract_published_date(page.html, page.url),
             "hits": [asdict(hit) for hit in hits],
         })
     return results, total_hits
@@ -315,8 +553,15 @@ def match_body_with_recall(
             {
                 "pageUrl": page.url,
                 "pageTitle": extract_title(page.html),
+                "displayTitle": extract_display_title(
+                    page.html, extract_title(page.html), page.url),
                 "hits": [asdict(hit) for hit in hits],
                 "matchStrength": "strong",
+                "publishedDate": (
+                    candidate.published_date
+                    if candidate and candidate.published_date
+                    else None
+                ),
             },
             candidate,
             index,
@@ -346,8 +591,10 @@ def match_body_with_recall(
             {
                 "pageUrl": candidate.url,
                 "pageTitle": candidate.title_hint,
+                "displayTitle": candidate.title_hint,
                 "hits": [asdict(hit) for hit in hits],
                 "matchStrength": "weak",
+                "publishedDate": candidate.published_date or None,
             },
             candidate,
             page_offset + candidate_index,

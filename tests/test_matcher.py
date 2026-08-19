@@ -413,7 +413,8 @@ def test_match_body_with_recall_sorts_and_hides_ranking_metadata():
         "https://x.test/weak-unknown",
     ]
     assert all(set(item) == {
-        "pageUrl", "pageTitle", "hits", "matchStrength",
+        "pageUrl", "pageTitle", "displayTitle", "hits",
+        "matchStrength", "publishedDate",
     } for item in results)
 
 
