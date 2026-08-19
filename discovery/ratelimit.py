@@ -21,14 +21,15 @@ def _env_int(key: str, default: int) -> int:
 
 
 DEFAULT_MAX_RPS = _env_float("MAX_RPS_PER_HOST", 2.0)
+GOV_SITE_RPS = _env_float("GOV_SITE_RPS", 3.0)
 DEFAULT_COOLDOWN_SECONDS = _env_float("RATE_LIMIT_COOLDOWN_S", 30.0)
 COOLDOWN_DECAY = 0.8
 
 GOV_SITE_OVERRIDES: dict[str, float] = {
-    "www.yngp.com": 1.0,
-    "www.ccgp.gov.cn": 1.0,
-    "zycg.gov.cn": 1.0,
-    "www.zycg.gov.cn": 1.0,
+    "www.yngp.com": GOV_SITE_RPS,
+    "www.ccgp.gov.cn": GOV_SITE_RPS,
+    "zycg.gov.cn": GOV_SITE_RPS,
+    "www.zycg.gov.cn": GOV_SITE_RPS,
 }
 
 

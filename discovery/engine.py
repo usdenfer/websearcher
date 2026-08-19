@@ -169,7 +169,7 @@ async def _gather_candidates(coroutines, budget: BudgetManager):
         return [], False
     try:
         done, pending = await asyncio.wait(
-            tasks, timeout=None
+            tasks, timeout=budget.remaining_seconds()
         )
     except BaseException:
         for task in tasks:
