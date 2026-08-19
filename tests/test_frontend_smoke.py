@@ -105,22 +105,66 @@ async def _fake_stream(messages):
         yield t
 
 
-def test_search_and_ai_flow(app_server, site_server, monkeypatch):
+def test_search_and_ai_flow(app_server, monkeypatch):
     cache._store.clear()
     monkeypatch.setattr(server, "expand_keywords", _no_expand)
     monkeypatch.setattr(server, "chat_stream", _fake_stream)
+
+    result = {
+        "keywords": ["alpha"],
+        "expandedKeywords": [],
+        "results": [{
+            "pageUrl": "https://example.test/article",
+            "pageTitle": "Alpha 页面",
+            "matchStrength": "strong",
+            "hits": [{
+                "kind": "text",
+                "keyword": "alpha",
+                "snippet": "alpha 相关内容",
+                "href": "https://example.test/article",
+            }],
+        }],
+    }
+    texts = {"https://example.test/article": "alpha 相关内容"}
+    search_id = cache.put(result, texts)
 
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
+        page.route(
+            "**/api/search",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                json={
+                    "searchId": search_id,
+                    "aiAvailable": True,
+                    "pagesCrawled": 1,
+                    "depth": 1,
+                    "render": False,
+                    "totalHits": 1,
+                    "weakHits": 0,
+                    "keywords": ["alpha"],
+                    "expandedKeywords": [],
+                    "results": result["results"],
+                    "crawledPages": ["https://example.test/article"],
+                    "pagesFailed": [],
+                    "discovery": {
+                        "sourcesSucceeded": [],
+                        "warnings": [],
+                        "partial": False,
+                        "budgetExpanded": False,
+                    },
+                },
+            ),
+        )
         page.goto(app_server + "/")
 
         # 默认应为自动模式
         assert page.input_value("#render") == "auto"
 
-        # 填写并搜索
-        page.fill("#url", f"{site_server}/index.html")
+        # 填写关键词并搜索
         page.fill("#kw", "alpha")
         page.click("#go")
 
@@ -219,7 +263,6 @@ def test_only_weak_recall_renders_result_card(app_server):
             ),
         )
         page.goto(app_server + "/")
-        page.fill("#url", "https://example.test/")
         page.fill("#kw", "alpha")
         page.click("#go")
 
