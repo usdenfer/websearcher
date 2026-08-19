@@ -164,7 +164,7 @@ class Provider:
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (429, 503):
+                if exc.response.status_code in (403, 429, 503):
                     await self._rate_limiter.report_rate_limited(
                         current_url or str(response.url)
                     )

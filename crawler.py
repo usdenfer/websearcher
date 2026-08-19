@@ -275,7 +275,7 @@ async def _fetch_crawl_html_retry(
         except RETRYABLE_TRANSPORT as exc:
             last_exc = exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code < 500:
+            if exc.response.status_code < 500 and exc.response.status_code not in (403, 429):
                 raise
             last_exc = exc
         if attempt < attempts - 1:
@@ -308,7 +308,7 @@ async def fetch_html_retry(client: httpx.AsyncClient, url: str,
         except RETRYABLE_TRANSPORT as exc:
             last_exc = exc
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code < 500:
+            if exc.response.status_code < 500 and exc.response.status_code not in (403, 429):
                 raise
             last_exc = exc
         if attempt < attempts - 1:
