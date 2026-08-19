@@ -6,6 +6,7 @@ import pytest
 from discovery.adapters import (
     FreeCmsAdapter,
     SiteAdapter,
+    YngpAdapter,
     YunnanCmsAdapter,
     select_adapter,
 )
@@ -410,3 +411,160 @@ def test_freecms_domain_policy_allows_related_content_hosts():
         "https://www.zycg.gov.cn/freecms/site/zygjjgzfcgzx/ggxx/info/1.html",
         policy,
     )
+
+
+def test_yngp_adapter_is_selected_by_host():
+    adapter = select_adapter("http://www.yngp.com/", "<html></html>")
+
+    assert isinstance(adapter, YngpAdapter)
+    assert adapter.profile == "yngp"
+    assert adapter.origin == "http://www.yngp.com"
+    assert adapter.list_url == (
+        "http://www.yngp.com/page/procurement/procurementList.html"
+    )
+    assert adapter.api_url == (
+        "http://www.yngp.com"
+        "/api/procurement/Procurement.gghtMoreList.svc"
+    )
+
+
+def test_yngp_adapter_is_selected_by_bootgrid_api_marker():
+    homepage = '<script>url:"/api/procurement/Procurement.gghtMoreList.svc"</script>'
+    adapter = select_adapter("https://mirror.example.test/", homepage)
+
+    assert isinstance(adapter, YngpAdapter)
+    assert adapter.profile == "yngp"
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (
+            {"tabletype": "23", "bulletin_id": "abc.123"},
+            "http://www.yngp.com"
+            "/viewPurchaseInfo.html?sys_purchaseintention_id=abc.123",
+        ),
+        (
+            {"tabletype": "1", "bulletin_id": "abc.123"},
+            "http://www.yngp.com/showBulletinInfo.html?bulletin_id=abc.123",
+        ),
+        (
+            {
+                "tabletype": "3",
+                "bulletinclass": "bxlx014",
+                "bulletin_id": "abc.123",
+            },
+            "http://www.yngp.com"
+            "/showContractDetailInfo.html?bulletin_id=abc.123",
+        ),
+        (
+            {"tabletype": "4", "bulletin_id": "abc.123"},
+            "http://www.yngp.com/showBulletinInfo.html?bulletin_id=abc.123",
+        ),
+        (
+            {"tabletype": "5", "bulletin_id": "abc.123"},
+            "http://www.yngp.com/showBulletinInfo.html?bulletin_id=abc.123",
+        ),
+        (
+            {"tabletype": "8", "bulletin_id": "abc.123"},
+            "http://www.yngp.com"
+            "/showAcceptanceResultsNoticeInfo.html?bulletinid=abc.123",
+        ),
+        (
+            {"tabletype": "9", "bulletin_id": "abc.123"},
+            "http://www.yngp.com/showZCYBulletinInfo.html?bulletin_id=abc.123",
+        ),
+        (
+            {"tabletype": "17", "bulletin_id": "abc.123"},
+            "http://www.yngp.com/showZCYManageBulletinInfo.html"
+            "?bulletin_id=abc.123&tabletype=17",
+        ),
+        (
+            {"tabletype": "21", "bulletin_id": "abc.123"},
+            "http://www.yngp.com"
+            "/showContractChangeNoticeInfo.html?bulletin_id=abc.123",
+        ),
+        (
+            {"tabletype": "24", "bulletin_id": "abc.123"},
+            "http://www.yngp.com/showZCYManageBulletinInfo.html"
+            "?bulletin_id=abc.123&tabletype=24",
+        ),
+        (
+            {"bulletin_id": "abc.123"},
+            "http://www.yngp.com/showBulletinInfo.html?bulletin_id=abc.123",
+        ),
+    ],
+)
+def test_yngp_detail_url_follows_site_tabletype_rules(row, expected):
+    adapter = YngpAdapter("http://www.yngp.com/")
+
+    assert adapter.detail_url(row) == expected
+
+
+def test_yngp_detail_url_rejects_missing_bulletin_id():
+    adapter = YngpAdapter("http://www.yngp.com/")
+
+    assert adapter.detail_url({"tabletype": "23"}) == ""
+    assert adapter.detail_url({}) == ""
+
+
+def test_yngp_parse_api_response_accepts_rows():
+    adapter = YngpAdapter("http://www.yngp.com/")
+    body = json.dumps(
+        {
+            "code": "1",
+            "data": {
+                "current": 1,
+                "total": 2,
+                "rows": [
+                    {"bulletin_id": "a", "tabletype": "23"},
+                    {"bulletin_id": "b", "tabletype": "1"},
+                ],
+            },
+            "status": 200,
+        }
+    )
+
+    ok, total, rows, warning = adapter.parse_api_response(body)
+
+    assert ok is True
+    assert total == 2
+    assert [row["bulletin_id"] for row in rows] == ["a", "b"]
+    assert warning == ""
+
+
+def test_yngp_parse_api_response_accepts_empty_rows():
+    adapter = YngpAdapter("http://www.yngp.com/")
+    body = json.dumps(
+        {"code": "1", "data": {"current": 1, "total": 0, "rows": []}}
+    )
+
+    ok, total, rows, _warning = adapter.parse_api_response(body)
+
+    assert ok is True
+    assert total == 0
+    assert rows == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not-json",
+        json.dumps(["not", "a", "dict"]),
+        json.dumps({"code": "0", "data": {"rows": []}}),
+        # 会话未通过校验时服务端返回空 data（无 rows 键）
+        json.dumps({"code": "1", "data": {}}),
+        json.dumps({"code": "1", "data": []}),
+        json.dumps({"code": "1", "data": {"rows": "oops"}}),
+        json.dumps({"code": "1", "data": {"rows": [["not-a-dict"]]}}),
+    ],
+)
+def test_yngp_parse_api_response_rejects_invalid_payloads(body):
+    adapter = YngpAdapter("http://www.yngp.com/")
+
+    ok, total, rows, warning = adapter.parse_api_response(body)
+
+    assert ok is False
+    assert total is None
+    assert rows == []
+    assert warning != ""

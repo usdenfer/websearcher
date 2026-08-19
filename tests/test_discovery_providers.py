@@ -6,7 +6,7 @@ from datetime import date
 import httpx
 import pytest
 
-from discovery.adapters import FreeCmsAdapter, YunnanCmsAdapter
+from discovery.adapters import FreeCmsAdapter, YngpAdapter, YunnanCmsAdapter
 from discovery.fetcher import DiscoveryFetcher
 from discovery.models import (
     BudgetManager,
@@ -22,6 +22,7 @@ from discovery.providers import (
     Provider,
     SearchProvider,
     SitemapProvider,
+    YngpProvider,
     YunnanCmsProvider,
 )
 
@@ -686,7 +687,7 @@ def test_provider_budget_rejection_does_not_consume_html_budget():
             return httpx.Response(200, text="<main/>")
 
         budget = BudgetManager()
-        budget.provider_requests["site-search"] = 10
+        budget.provider_requests["site-search"] = 500
         stats = DiscoveryStats()
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
@@ -2299,5 +2300,231 @@ def test_yunnan_count_accepts_real_json_response():
         ]
         assert "site-search" in stats.sources_succeeded
         assert not any("invalid count" in w for w in stats.warnings)
+
+    asyncio.run(run())
+
+
+def _yngp_row(bulletin_id, tabletype="1", title="电梯采购项目",
+              finishday="2026-07-20", bulletinclass=""):
+    return {
+        "bulletin_id": bulletin_id,
+        "tabletype": tabletype,
+        "bulletintitle": title,
+        "finishday": finishday,
+        "bulletinclass": bulletinclass,
+    }
+
+
+def _yngp_api_payload(rows, total=None):
+    return json.dumps({
+        "code": "1",
+        "data": {
+            "current": 1,
+            "total": len(rows) if total is None else total,
+            "rows": rows,
+        },
+        "status": 200,
+    })
+
+
+def test_yngp_provider_discovers_candidates_for_each_query_type():
+    async def run():
+        posted_types = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/page/procurement/procurementList.html":
+                return httpx.Response(200, text="<html>list</html>")
+            if path == "/api/common/otheruse.getdistrictlist.svc":
+                return httpx.Response(200, text='{"code":"1","data":[]}')
+            if path == "/api/procurement/Procurement.gghtMoreList.svc":
+                form = dict(
+                    pair.split("=", 1)
+                    for pair in request.content.decode().split("&")
+                )
+                posted_types.append(form.get("query_type"))
+                assert form.get("current") == "1"
+                assert form.get("rowCount") == "10"
+                # 初始时间窗 = 最近 30 天
+                assert form.get("query_startTime") == "2026-06-29"
+                assert form.get("query_endTime") == "2026-07-29"
+                assert request.url.params.get("captchaCheckFlag") == "0"
+                rows = {
+                    "23": [
+                        _yngp_row("id-a", "23", "电梯意向", "2026-07-25"),
+                        # 超出 30 天窗口，应被过滤
+                        _yngp_row("id-old", "23", "电梯意向", "2026-06-01"),
+                    ],
+                    "1": [
+                        _yngp_row("id-b", "1", "电梯招标公告", "2026-07-26"),
+                        # 与 "2" 类重复的公告，应去重
+                        _yngp_row("id-c", "1", "电梯结果公告", "2026-07-27"),
+                    ],
+                    "3": [],
+                    "2": [
+                        _yngp_row("id-c", "2", "电梯结果公告", "2026-07-27"),
+                    ],
+                }[form.get("query_type")]
+                return httpx.Response(200, text=_yngp_api_payload(rows))
+            return httpx.Response(404)
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            provider = YngpProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                YngpAdapter("https://x.test/"),
+                today=date(2026, 7, 29),
+            )
+            result = await provider.discover(["电梯"])
+
+        assert posted_types == ["23", "1", "23", "1"]
+        by_url = {item.url: item for item in result}
+        assert set(by_url) == {
+            "https://x.test/viewPurchaseInfo.html"
+            "?sys_purchaseintention_id=id-a",
+            "https://x.test/showBulletinInfo.html?bulletin_id=id-b",
+            "https://x.test/showBulletinInfo.html?bulletin_id=id-c",
+        }
+        assert all(item.score == 100 for item in result)
+        assert by_url[
+            "https://x.test/showBulletinInfo.html?bulletin_id=id-b"
+        ].published_date == "2026-07-26"
+        assert "yngp-api" in stats.sources_succeeded
+        assert stats.warnings == []
+
+    asyncio.run(run())
+
+
+def test_yngp_provider_reports_session_check_failure():
+    async def run():
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/page/procurement/procurementList.html":
+                return httpx.Response(200, text="<html>list</html>")
+            if path == "/api/common/otheruse.getdistrictlist.svc":
+                return httpx.Response(200, text='{"code":"1","data":[]}')
+            # 会话校验未通过：返回空 data
+            return httpx.Response(
+                200, text='{"code":"1","data":{},"status":200}'
+            )
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            provider = YngpProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                YngpAdapter("https://x.test/"),
+                today=date(2026, 7, 29),
+            )
+            result = await provider.discover(["电梯"])
+
+        assert result == []
+        assert "yngp-api" not in stats.sources_succeeded
+        assert stats.stop_reason == "channel-failure"
+        assert any(
+            "会话校验未通过" in warning
+            for warning in stats.warnings
+        )
+
+    asyncio.run(run())
+
+
+def test_yngp_provider_splits_overcrowded_windows_instead_of_paging():
+    """total > 10 的时间窗按对半细分，直到每片一页装下；较新窗口优先。"""
+    async def run():
+        posted_windows = []
+        leaves = {
+            ("2026-07-23", "2026-07-29"): [
+                _yngp_row("id-n1", "23", "电梯意向", "2026-07-29"),
+                _yngp_row("id-n2", "23", "电梯意向", "2026-07-28"),
+                _yngp_row("id-n3", "23", "电梯意向", "2026-07-25"),
+            ],
+            ("2026-07-15", "2026-07-22"): [
+                _yngp_row("id-n4", "23", "电梯意向", "2026-07-20"),
+                _yngp_row("id-n5", "23", "电梯意向", "2026-07-16"),
+            ],
+            ("2026-06-29", "2026-07-14"): [
+                _yngp_row("id-o1", "23", "电梯意向", "2026-07-10"),
+                _yngp_row("id-o2", "23", "电梯意向", "2026-06-30"),
+            ],
+        }
+        crowded = {
+            ("2026-06-29", "2026-07-29"): 18,
+            ("2026-07-15", "2026-07-29"): 16,
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/page/procurement/procurementList.html":
+                return httpx.Response(200, text="<html>list</html>")
+            if path == "/api/common/otheruse.getdistrictlist.svc":
+                return httpx.Response(200, text='{"code":"1","data":[]}')
+            form = dict(
+                pair.split("=", 1)
+                for pair in request.content.decode().split("&")
+            )
+            window = (form.get("query_startTime"), form.get("query_endTime"))
+            posted_windows.append(window)
+            if window in crowded:
+                # 第一页装不下：返回 10 条占位 + 更大的 total
+                rows = [
+                    _yngp_row(f"skip-{window[0]}-{i}", "23")
+                    for i in range(10)
+                ]
+                return httpx.Response(
+                    200, text=_yngp_api_payload(rows, total=crowded[window])
+                )
+            if window in leaves:
+                return httpx.Response(
+                    200, text=_yngp_api_payload(leaves[window])
+                )
+            return httpx.Response(
+                500, text=f"unexpected window: {window}"
+            )
+
+        stats = DiscoveryStats()
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            provider = YngpProvider(
+                client,
+                BudgetManager(),
+                stats,
+                POLICY,
+                YngpAdapter("https://x.test/"),
+                today=date(2026, 7, 29),
+                query_types=("23",),
+            )
+            result = await provider.discover(["电梯"])
+
+        assert posted_windows == [
+            ("2026-06-29", "2026-07-29"),
+            ("2026-07-15", "2026-07-29"),
+            ("2026-07-23", "2026-07-29"),
+            ("2026-07-15", "2026-07-22"),
+            ("2026-06-29", "2026-07-14"),
+            # 全量补拉：keyword="" 无关键词第二轮
+            ("2026-06-29", "2026-07-29"),
+            ("2026-07-15", "2026-07-29"),
+            ("2026-07-23", "2026-07-29"),
+            ("2026-07-15", "2026-07-22"),
+            ("2026-06-29", "2026-07-14"),
+        ]
+        assert {item.url for item in result} == {
+            "https://x.test/viewPurchaseInfo.html"
+            f"?sys_purchaseintention_id=id-{suffix}"
+            for suffix in ("n1", "n2", "n3", "n4", "n5", "o1", "o2")
+        }
+        assert stats.stop_reason is None
+        assert stats.warnings == []
 
     asyncio.run(run())

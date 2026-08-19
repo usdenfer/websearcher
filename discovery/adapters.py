@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
-from urllib.parse import SplitResult, urljoin, urlsplit
+from urllib.parse import SplitResult, quote, urljoin, urlsplit
 
 from discovery.models import DomainPolicy, SearchSpec
 
@@ -204,6 +204,93 @@ class YunnanCmsAdapter(SiteAdapter):
         ]
 
 
+class YngpAdapter(SiteAdapter):
+    """云南省政府采购网（yngp.com）：公告列表由 bootgrid AJAX 接口驱动。
+
+    列表页 /page/procurement/procurementList.html 静态 HTML 里没有公告
+    链接，数据由 /api/procurement/Procurement.gghtMoreList.svc 以 JSON
+    返回；详情页地址按列表 JS（procurementList.js 的 show()）中的
+    tabletype 规则拼接。
+    """
+
+    profile = "yngp"
+
+    def __init__(self, start_url: str):
+        self.origin = _origin(start_url)
+
+    @property
+    def list_url(self) -> str:
+        return self.origin + "/page/procurement/procurementList.html"
+
+    @property
+    def warm_url(self) -> str:
+        return self.origin + "/api/common/otheruse.getdistrictlist.svc"
+
+    @property
+    def api_url(self) -> str:
+        return self.origin + "/api/procurement/Procurement.gghtMoreList.svc"
+
+    def detail_url(self, row: dict) -> str:
+        bulletin_id = str(row.get("bulletin_id") or "").strip()
+        if not bulletin_id:
+            return ""
+        tabletype = str(row.get("tabletype") or "").strip()
+        bulletinclass = str(row.get("bulletinclass") or "").strip()
+        bid = quote(bulletin_id)
+        if tabletype in {"3", "4"} and bulletinclass == "bxlx014":
+            path = f"/showContractDetailInfo.html?bulletin_id={bid}"
+        elif tabletype == "8":
+            path = f"/showAcceptanceResultsNoticeInfo.html?bulletinid={bid}"
+        elif tabletype in {"9", "12", "13", "14", "15", "19"}:
+            path = f"/showZCYBulletinInfo.html?bulletin_id={bid}"
+        elif tabletype in {"11", "16", "17", "18", "22", "24"}:
+            path = (
+                f"/showZCYManageBulletinInfo.html?bulletin_id={bid}"
+                f"&tabletype={tabletype}"
+            )
+        elif tabletype == "21":
+            path = f"/showContractChangeNoticeInfo.html?bulletin_id={bid}"
+        elif tabletype == "23":
+            path = f"/viewPurchaseInfo.html?sys_purchaseintention_id={bid}"
+        else:
+            # 站内跳转 /ggmxinfo.html?bulletinid=，301 到该详情地址
+            path = f"/showBulletinInfo.html?bulletin_id={bid}"
+        return self.origin + path
+
+    def parse_api_response(
+        self,
+        body: str,
+    ) -> tuple[bool, int | None, list[dict], str]:
+        try:
+            response = json.loads(body)
+        except (json.JSONDecodeError, TypeError, UnicodeError):
+            return False, None, [], "YNGP 采购接口返回了无效 JSON"
+        if not isinstance(response, dict):
+            return False, None, [], "YNGP 采购接口业务失败"
+        if str(response.get("code")) != "1":
+            return False, None, [], "YNGP 采购接口业务失败"
+        payload = response.get("data")
+        if not isinstance(payload, dict):
+            return False, None, [], "YNGP 采购接口数据结构无效"
+        rows = payload.get("rows")
+        if rows is None:
+            # 会话未通过服务端校验时返回 {"code":"1","data":{}}；
+            # 正常空结果的 data 中带有 "rows": []
+            return False, None, [], "YNGP 采购接口会话校验未通过"
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows
+        ):
+            return False, None, [], "YNGP 采购接口数据结构无效"
+        raw_total = payload.get("total")
+        total: int | None = None
+        if raw_total is not None:
+            try:
+                total = int(raw_total)
+            except (TypeError, ValueError):
+                total = None
+        return True, total, list(rows), ""
+
+
 def select_adapter(start_url: str, homepage: str) -> SiteAdapter:
     parts = _safe_urlsplit(start_url)
     host = (parts.hostname or "").lower().rstrip(".") if parts else ""
@@ -223,4 +310,11 @@ def select_adapter(start_url: str, homepage: str) -> SiteAdapter:
         or "msearchgo" in lowered
     ):
         return YunnanCmsAdapter(start_url)
+    if (
+        host == "yngp.com"
+        or host.endswith(".yngp.com")
+        # 列表页由 bootgrid AJAX 接口驱动，首页/列表页脚本引用该接口
+        or "procurement.gghtmorelist.svc" in lowered
+    ):
+        return YngpAdapter(start_url)
     return SiteAdapter()

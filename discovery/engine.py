@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from crawler import CrawledPage, CrawlResult
 from discovery.adapters import (
     FreeCmsAdapter,
+    YngpAdapter,
     YunnanCmsAdapter,
     select_adapter,
 )
@@ -32,6 +33,7 @@ from discovery.providers import (
     FreeCmsRecentProvider,
     SearchProvider,
     SitemapProvider,
+    YngpProvider,
     YunnanCmsProvider,
 )
 from discovery.urltools import (
@@ -167,7 +169,7 @@ async def _gather_candidates(coroutines, budget: BudgetManager):
         return [], False
     try:
         done, pending = await asyncio.wait(
-            tasks, timeout=budget.remaining_seconds()
+            tasks, timeout=None
         )
     except BaseException:
         for task in tasks:
@@ -200,10 +202,11 @@ async def discover_pages(
     base_result: CrawlResult,
     depth: int,
     render_mode: str,
-    timeout_seconds: float = 120.0,
+    timeout_seconds: float = 86400.0,
     started_at: float | None = None,
     skip_urls: Iterable[str] = (),
     budget: BudgetManager | None = None,
+    query_types: tuple[str, ...] | None = None,
 ) -> DiscoveryRun:
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
@@ -298,6 +301,15 @@ async def discover_pages(
         elif isinstance(adapter, YunnanCmsAdapter):
             providers.append(
                 YunnanCmsProvider(client, budget, stats, policy, adapter)
+            )
+        elif isinstance(adapter, YngpAdapter):
+            yngp_kwargs = (
+                {} if query_types is None else {"query_types": query_types}
+            )
+            providers.append(
+                YngpProvider(
+                    client, budget, stats, policy, adapter, **yngp_kwargs
+                )
             )
         elif specs:
             providers.append(
@@ -431,30 +443,25 @@ async def discover_pages(
                 if item.url not in first_success_urls
             ],
         ]
-        high_value = list({
-            item.url: item
-            for item in remaining
-            if item.score >= 55
-            and item.url not in first_success_urls
-        }.values())
-        if budget.expand(len(high_value)):
+        # 全量搜索：剩余候选一次性全部抓取，先扩展预算到 max_pages
+        if budget.expand(len(remaining)):
             stats.budget_expanded = True
-            second_capacity = max(
-                0, budget.page_limit - budget.used_html_pages
+        second_capacity = max(
+            0, budget.page_limit - budget.used_html_pages
+        )
+        second_batch = remaining[:second_capacity]
+        if second_batch:
+            fetched, timed_out = await _gather_candidates(
+                [fetch(item) for item in second_batch],
+                budget,
             )
-            second_batch = high_value[:second_capacity]
-            if second_batch:
-                fetched, timed_out = await _gather_candidates(
-                    [fetch(item) for item in second_batch],
-                    budget,
-                )
-                stats.partial = stats.partial or timed_out
-                second_success_urls: set[str] = set()
-                append_unique(
-                    [item for item in fetched if item is not None],
-                    second_success_urls,
-                )
-                scheduled_count += len(second_batch)
+            stats.partial = stats.partial or timed_out
+            second_success_urls: set[str] = set()
+            append_unique(
+                [item for item in fetched if item is not None],
+                second_success_urls,
+            )
+            scheduled_count += len(second_batch)
 
         stats.candidates_fetched = len(pages)
         time_budget_exhausted = budget.expired()

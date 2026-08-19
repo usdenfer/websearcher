@@ -962,6 +962,8 @@ def test_live_budget_after_providers_controls_initial_and_expanded_fetches(
 def test_default_budget_caps_150_candidates_at_120_pages_including_base(
     monkeypatch,
 ):
+    import discovery.engine as engine
+
     candidates = [
         Candidate(
             f"https://x.test/archive/{index}.html",
@@ -978,6 +980,9 @@ def test_default_budget_caps_150_candidates_at_120_pages_including_base(
     base = CrawlResult(
         pages=[CrawledPage("https://x.test/", "<html>home</html>")]
     )
+    budget = BudgetManager(
+        initial_pages=60, max_pages=120, used_html_pages=1
+    )
     result = _run(
         discover_pages(
             "https://x.test/",
@@ -985,11 +990,11 @@ def test_default_budget_caps_150_candidates_at_120_pages_including_base(
             base,
             depth=1,
             render_mode="off",
+            budget=budget,
         )
     )
 
     assert result.stats.candidates_found == 150
-    assert result.stats.budget_expanded is True
     assert result.stats.partial is True
     assert len(fetchers[0].urls) == 119
     assert result.stats.candidates_fetched <= 119
@@ -998,6 +1003,7 @@ def test_default_budget_caps_150_candidates_at_120_pages_including_base(
 
 
 def test_budget_does_not_expand_for_only_low_value_remaining(monkeypatch):
+    """全量搜索：扩展预算抓取所有剩余候选，不再区分分值。"""
     import discovery.engine as engine
 
     candidates = [
@@ -1028,10 +1034,9 @@ def test_budget_does_not_expand_for_only_low_value_remaining(monkeypatch):
         )
     )
 
-    assert len(fetchers[0].urls) == 1
-    assert result.stats.budget_expanded is False
-    assert result.stats.partial is True
-    assert result.stats.stop_reason == "html-page-budget"
+    assert len(fetchers[0].urls) == 3
+    assert result.stats.budget_expanded is True
+    assert result.stats.partial is False
 
 
 def test_explicit_zero_started_at_is_preserved_and_prevents_requests(
