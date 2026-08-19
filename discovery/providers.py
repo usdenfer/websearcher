@@ -1162,7 +1162,7 @@ class YngpProvider(Provider):
         today: date | None = None,
         query_types: tuple[str, ...] = DEFAULT_QUERY_TYPES,
         recent_days: int = 30,
-        max_windows_per_query: int = 12,
+        max_windows_per_query: int = 60,
     ):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
