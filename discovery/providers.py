@@ -1164,6 +1164,8 @@ class YngpProvider(Provider):
         recent_days: int = 30,
         max_windows_per_query: int = 60,
         full_sweep: bool = True,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
@@ -1173,6 +1175,8 @@ class YngpProvider(Provider):
         # 单个（关键字 × 类别）组合允许的最大时间窗请求数
         self.max_windows_per_query = max_windows_per_query
         self.full_sweep = full_sweep
+        self.start_date = start_date
+        self.end_date = end_date
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -1359,8 +1363,12 @@ class YngpProvider(Provider):
         都能被一页装下。优先处理较新的窗口。
         """
         business_success = False
-        cutoff = self.today - timedelta(days=self.recent_days)
-        stack = [(cutoff, self.today)]
+        window_start = self.start_date or (
+            self.today - timedelta(days=self.recent_days)
+        )
+        window_end = self.end_date or self.today
+        cutoff = window_start
+        stack = [(window_start, window_end)]
         queries = 0
         overflow_warned = False
         # 余量不足时提前退出，给候选页抓取留出时间

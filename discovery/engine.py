@@ -5,6 +5,7 @@ import inspect
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from datetime import date
 from urllib.parse import urlsplit
 
 from crawler import CrawledPage, CrawlResult
@@ -210,6 +211,8 @@ async def discover_pages(
     recent_days: int | None = None,
     max_windows_per_query: int | None = None,
     full_sweep: bool | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> DiscoveryRun:
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
@@ -315,6 +318,10 @@ async def discover_pages(
                 yngp_kwargs["max_windows_per_query"] = max_windows_per_query
             if full_sweep is not None:
                 yngp_kwargs["full_sweep"] = full_sweep
+            if start_date is not None:
+                yngp_kwargs["start_date"] = start_date
+            if end_date is not None:
+                yngp_kwargs["end_date"] = end_date
             providers.append(
                 YngpProvider(
                     client, budget, stats, policy, adapter, **yngp_kwargs
