@@ -27,6 +27,7 @@ class Candidate:
     source_evidence: tuple[str, ...] = field(
         default=(), compare=False
     )
+    district: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)

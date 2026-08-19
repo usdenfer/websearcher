@@ -1456,6 +1456,7 @@ class YngpProvider(Provider):
             if published is None:
                 self.stats.unknown_date_candidates += 1
             title = str(row.get("bulletintitle") or "")
+            district = str(row.get("districtname") or "")
             result.append(
                 Candidate(
                     candidate_url,
@@ -1469,5 +1470,6 @@ class YngpProvider(Provider):
                         else None
                     ),
                     source_evidence=(self.source,),
+                    district=district,
                 )
             )
