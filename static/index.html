@@ -5,36 +5,42 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>站内关键词搜索</title>
 <style>
-  :root { --accent:#2f6fed; --bg:#f6f7f9; --card:#fff; --line:#e3e6eb; }
+  :root { --accent:#0066cc; --bg:#f5f5f7; --card:#fff; --line:#e0e0e0; --ink:#1d1d1f; }
   * { box-sizing:border-box; }
-  body { margin:0; font-family:"Microsoft YaHei",system-ui,sans-serif;
-         background:var(--bg); color:#222; }
-  header { background:var(--card); border-bottom:1px solid var(--line);
-           padding:16px 24px; position:sticky; top:0; z-index:2; }
-  h1 { font-size:18px; margin:0 0 12px; }
+  body { margin:0; font-family:"Microsoft YaHei",system-ui,-apple-system,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { background:rgba(255,255,255,.85); backdrop-filter:blur(20px);
+           -webkit-backdrop-filter:blur(20px);
+           border-bottom:1px solid var(--line);
+           padding:14px 24px; position:sticky; top:0; z-index:2; }
+  h1 { font-size:17px; font-weight:600; margin:0 0 10px; color:var(--ink); letter-spacing:-.2px; }
   .bar { display:flex; gap:8px; flex-wrap:wrap; }
-  input { padding:9px 12px; border:1px solid var(--line); border-radius:8px;
-          font-size:14px; }
-  select { padding:9px 12px; border:1px solid var(--line); border-radius:8px;
-           font-size:14px; background:#fff; }
-  #url { flex:2 1 320px; } #kw { flex:1 1 200px; }
-  button { padding:9px 20px; border:0; border-radius:8px; background:var(--accent);
-           color:#fff; font-size:14px; cursor:pointer; }
-  button:disabled { opacity:.55; cursor:default; }
-  main { max-width:960px; margin:24px auto; padding:0 16px 48px; }
-  .status { padding:24px; text-align:center; color:#666; }
+  input { padding:8px 12px; border:1px solid var(--line); border-radius:8px;
+          font-size:14px; background:var(--card); color:var(--ink); outline:none;
+          transition:border-color .2s; }
+  input:focus { border-color:var(--accent); }
+  select { padding:8px 12px; border:1px solid var(--line); border-radius:8px;
+           font-size:14px; background:var(--card); color:var(--ink); outline:none; }
+  #kw { flex:1 1 320px; }
+  button { padding:8px 18px; border:0; border-radius:9999px; background:var(--accent);
+           color:#fff; font-size:14px; cursor:pointer; font-weight:500;
+           transition:background .2s,opacity .2s; }
+  button:hover { background:#0071e3; }
+  button:disabled { opacity:.4; cursor:default; }
+  main { max-width:1200px; margin:24px auto; padding:0 24px 48px; }
+  .status { padding:32px; text-align:center; color:var(--ink); opacity:.6; }
   .spinner { display:inline-block; width:18px; height:18px; margin-right:8px;
              border:3px solid var(--line); border-top-color:var(--accent);
              border-radius:50%; animation:spin .8s linear infinite;
              vertical-align:-4px; }
   @keyframes spin { to { transform:rotate(360deg); } }
   .card { background:var(--card); border:1px solid var(--line);
-          border-radius:10px; margin-bottom:16px; overflow:hidden; }
-  .card h2 { font-size:15px; margin:0; padding:12px 16px;
-             border-bottom:1px solid var(--line); word-break:break-all; }
+          border-radius:11px; margin-bottom:16px; overflow:hidden; }
+  .card h2 { font-size:15px; font-weight:600; margin:0; padding:12px 16px;
+             border-bottom:1px solid var(--line); word-break:break-all; color:var(--ink); }
   .card h2 a { color:var(--accent); text-decoration:none; }
   .hit { display:flex; gap:10px; align-items:flex-start;
-         padding:10px 16px; border-top:1px solid #f0f1f4; font-size:14px; }
+         padding:10px 16px; border-top:1px solid #f0f0f0; font-size:14px; }
   .hit:first-of-type { border-top:0; }
   .badge { flex:0 0 auto; font-size:12px; padding:2px 8px; border-radius:20px;
            background:#eef3ff; color:var(--accent); white-space:nowrap; }
@@ -44,21 +50,21 @@
           text-decoration:none; padding-top:2px; }
   .actions { flex:0 0 auto; display:flex; flex-direction:column; gap:4px;
              align-items:flex-end; }
-  .linkref { font-size:12px; color:#888; word-break:break-all; }
+  .linkref { font-size:12px; color:#999; word-break:break-all; }
   .linkref a { color:var(--accent); text-decoration:none; }
-  .empty { background:#fff8e6; border:1px solid #ffe1a8; border-radius:10px;
+  .empty { background:#fff8e6; border:1px solid #ffe1a8; border-radius:11px;
            padding:20px 24px; }
   .empty h2 { margin:0 0 10px; font-size:16px; color:#8a5a00; }
   .empty ul { margin:8px 0 0; padding-left:20px; font-size:13px; color:#666; }
-  details { font-size:13px; color:#666; margin-top:8px; }
+  details { font-size:13px; color:#999; margin-top:8px; }
   .error { background:#fdecec; border:1px solid #f5c2c2; color:#a33;
-           border-radius:10px; padding:16px 20px; }
-  .meta-line { font-size:13px; color:#777; margin:0 0 16px; }
+           border-radius:11px; padding:16px 20px; }
+  .meta-line { font-size:13px; color:#999; margin:0 0 16px; }
   .ai-card { background:var(--card); border:1px solid var(--line);
-             border-radius:10px; padding:16px 20px;
-             max-width:928px; margin:24px auto 0; }
-  @media (max-width:992px) { .ai-card { margin:24px 16px 0; } }
-  .ai-card h3 { margin:0 0 10px; font-size:15px; }
+             border-radius:11px; padding:20px 24px;
+             max-width:1200px; margin:24px auto 0; }
+  @media (max-width:1240px) { .ai-card { margin:24px 16px 0; } }
+  .ai-card h3 { margin:0 0 12px; font-size:15px; font-weight:600; color:var(--ink); }
   .expand-line { font-size:13px; color:#8a5a00; background:#fff8e6;
                  border:1px solid #ffe1a8; border-radius:8px;
                  padding:6px 10px; margin-bottom:10px; }
@@ -66,12 +72,41 @@
             word-break:break-all; }
   .ai-out a { color:var(--accent); }
   .ai-error { color:#a33; font-size:13px; margin-top:8px; }
-  .qa { border-top:1px solid var(--line); margin-top:12px; padding-top:12px; }
+  .sum-overview { font-size:15px; color:var(--ink); line-height:1.8; margin-bottom:24px;
+                  padding:0; opacity:.85; }
+  .sum-cards-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
+  @media (max-width:1000px) { .sum-cards-grid { grid-template-columns:repeat(3,1fr); } }
+  @media (max-width:720px)  { .sum-cards-grid { grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:480px)  { .sum-cards-grid { grid-template-columns:1fr; } }
+  .sum-card { background:var(--card); border:1px solid rgba(0,0,0,.06); border-radius:11px;
+              padding:18px; cursor:pointer; display:flex; flex-direction:column;
+              min-width:0; transition:transform .2s,box-shadow .2s; }
+  .sum-card:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,.10); }
+  .sum-card-date { font-size:11px; color:#999; margin-bottom:6px; }
+  .sum-card-title { font-size:14px; font-weight:600; color:var(--ink); margin-bottom:6px;
+                    line-height:1.35; display:-webkit-box; -webkit-line-clamp:2;
+                    -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+  .sum-card-summary { font-size:13px; color:#666; line-height:1.55; flex:1;
+                      display:-webkit-box; -webkit-line-clamp:3;
+                      -webkit-box-orient:vertical; overflow:hidden; margin-bottom:8px;
+                      overflow-wrap:anywhere; }
+  .sum-card-link { font-size:11px; color:var(--accent); white-space:nowrap;
+                   overflow:hidden; text-overflow:ellipsis; margin-top:auto;
+                   min-width:0; }
+  .sum-pagination { display:flex; align-items:center; justify-content:center;
+                    gap:12px; margin-top:16px; padding-top:12px; border-top:1px solid var(--line); }
+  .sum-page-btn { width:34px; height:34px; border-radius:50%; font-size:16px;
+                  padding:0; display:inline-flex; align-items:center; justify-content:center;
+                  background:#fff; color:var(--accent); border:1px solid var(--line); cursor:pointer; }
+  .sum-page-btn:hover:not(:disabled) { background:var(--accent); color:#fff; }
+  .sum-page-btn:disabled { opacity:.3; cursor:default; }
+  .sum-page-info { font-size:12px; color:#999; }
+  .qa { border-top:1px solid var(--line); margin-top:16px; padding-top:16px; }
   .qa-item { margin-bottom:12px; }
-  .qa-q { font-weight:600; font-size:14px; margin-bottom:4px; }
+  .qa-q { font-weight:600; font-size:14px; margin-bottom:4px; color:var(--ink); }
   .qa-input { display:flex; gap:8px; margin-top:8px; }
   .qa-input input { flex:1; }
-  .ai-btn { font-size:13px; padding:7px 14px; }
+  .ai-btn { font-size:13px; padding:7px 16px; border-radius:9999px; }
   .cursor { display:inline-block; width:8px; height:14px;
             background:var(--accent); vertical-align:-2px;
             animation:blink .7s step-start infinite; }
@@ -80,14 +115,14 @@
               margin-bottom:14px; }
   .job-form input[type="text"], .job-form input[type="url"] { flex:1 1 180px; }
   .job-form input[type="time"], .job-form input[type="number"] { width:110px; }
-  .job-row { border-top:1px solid #f0f1f4; padding:10px 0; font-size:13px; }
+  .job-row { border-top:1px solid var(--line); padding:10px 0; font-size:13px; }
   .job-row:first-of-type { border-top:0; }
-  .job-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .job-name { font-weight:600; font-size:14px; }
-  .job-sched { color:#666; }
-  .job-meta { color:#777; margin-top:4px; word-break:break-all; }
-  .job-result { margin-top:4px; color:#555; }
-  .job-error { margin-top:4px; color:#a33; }
+  .job-head { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
+  .job-name { font-weight:600; font-size:14px; color:var(--ink); overflow-wrap:anywhere; min-width:0; }
+  .job-sched { color:#999; overflow-wrap:anywhere; }
+  .job-meta { color:#999; margin-top:4px; word-break:break-all; }
+  .job-result { margin-top:4px; color:#666; overflow-wrap:anywhere; }
+  .job-error { margin-top:4px; color:#a33; overflow-wrap:anywhere; }
   .job-ops { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
   .job-ops button { font-size:12px; padding:5px 12px; }
   .job-ops .danger { background:#c0392b; }
@@ -99,6 +134,31 @@
                 border-radius:20px; background:#eef3ff; color:var(--accent);
                 margin-left:6px; }
   .job-empty { color:#888; font-size:13px; }
+  .job-ai-summary { margin-top:10px; border:1px solid var(--line); border-radius:9px;
+                    padding:14px; background:#fafbfc; display:none; }
+  .job-ai-summary.show { display:block; }
+  .job-ai-overview { font-size:14px; line-height:1.8; margin-bottom:14px; color:var(--ink); }
+  .job-ai-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  @media (max-width:720px) { .job-ai-cards { grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:480px) { .job-ai-cards { grid-template-columns:1fr; } }
+  .job-ai-card { background:var(--card); border:1px solid rgba(0,0,0,.06); border-radius:9px;
+                 padding:14px; cursor:pointer; min-width:0;
+                 transition:transform .2s,box-shadow .2s; }
+  .job-ai-card:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,.08); }
+  .job-ai-card-date { font-size:11px; color:#999; margin-bottom:4px; }
+  .job-ai-card-title { font-size:13px; font-weight:600; color:var(--ink); margin-bottom:4px;
+                       line-height:1.3; display:-webkit-box; -webkit-line-clamp:2;
+                       -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+  .job-ai-card-summary { font-size:12px; color:#666; line-height:1.5;
+                         display:-webkit-box; -webkit-line-clamp:2;
+                         -webkit-box-orient:vertical; overflow:hidden; margin-bottom:6px;
+                         overflow-wrap:anywhere; }
+  .job-ai-card-link { font-size:11px; color:var(--accent); white-space:nowrap;
+                      overflow:hidden; text-overflow:ellipsis; }
+  .job-sum-btn { font-size:12px; padding:5px 12px; background:#8a94a6; }
+  .job-sum-btn:hover { background:#6b7590; }
+  .job-sum-btn.has-new { background:#c0392b; animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.7; } }
   .switch { position:relative; display:inline-block; width:36px; height:20px; }
   .switch input { display:none; }
   .switch .slider { position:absolute; inset:0; border-radius:20px;
@@ -112,15 +172,9 @@
 </head>
 <body>
 <header>
-  <h1>站内关键词搜索</h1>
+  <h1>站内关键词搜索 — 云南政府采购网</h1>
   <div class="bar">
-    <input id="url" type="url" placeholder="起始网址，如 https://example.com">
     <input id="kw" type="text" placeholder="关键词（多个用空格分隔）">
-    <select id="depth" title="搜索深度：层数越大范围越广、耗时越长">
-      <option value="1">深度 1 层</option>
-      <option value="2">深度 2 层</option>
-      <option value="3">深度 3 层</option>
-    </select>
     <select id="render" title="抓取方式：自动模式先静态快搜，结果不完整时自动用浏览器渲染补搜">
       <option value="auto">自动模式</option>
       <option value="on">强制 JS 渲染</option>
@@ -133,7 +187,7 @@
 <section id="aiSection" class="ai-card" hidden>
   <h3>AI 助手</h3>
   <div id="expandLine" class="expand-line" hidden></div>
-  <button id="sumBtn" class="ai-btn">生成 AI 摘要</button>
+  <button id="sumBtn" class="ai-btn" title="需配置 DEEPSEEK_API_KEY 环境变量">生成 AI 摘要</button>
   <div id="sumOut" class="ai-out" style="margin-top:10px"></div>
   <div id="sumErr" class="ai-error"></div>
   <div class="qa">
@@ -148,15 +202,10 @@
   <h3>定时搜索任务</h3>
   <div class="job-form">
     <input id="jobName" type="text" placeholder="任务名（可选）">
-    <input id="jobUrl" type="url" placeholder="起始网址">
+    <input id="jobUrl" type="url" placeholder="起始网址" value="http://www.yngp.com/">
     <input id="jobKw" type="text" placeholder="关键词（空格分隔）">
   </div>
   <div class="job-form">
-    <select id="jobDepth">
-      <option value="1">深度 1 层</option>
-      <option value="2">深度 2 层</option>
-      <option value="3">深度 3 层</option>
-    </select>
     <select id="jobRender">
       <option value="auto">自动模式</option>
       <option value="on">强制 JS 渲染</option>
@@ -198,7 +247,7 @@ function renderStreamText(el, text, streaming) {
     (streaming ? '<span class="cursor"></span>' : "");
 }
 
-async function streamSSE(url, body, onDelta) {
+async function streamSSE(url, body, onDelta, onEvent) {
   const resp = await fetch(url, {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body)
@@ -225,6 +274,7 @@ async function streamSSE(url, body, onDelta) {
       if (evt.type === "delta") onDelta(evt.text);
       else if (evt.type === "error") throw new Error(evt.message);
       else if (evt.type === "done") return;
+      else if (onEvent) onEvent(evt);
     }
   }
 }
@@ -234,6 +284,96 @@ function escapeHtml(s) {
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[c]));
 }
+
+// ── AI 摘要卡片 & 分页 ──
+const SUM_PAGE_SIZE = 12;
+let _sumPage = 0;
+let _sumEntries = [];
+let _sumOverview = "";
+
+function parseSummaryEntries(text) {
+  // ── 新格式：优先匹配 【概述】 / 【条目】 分段标记 ──
+  const ovMatch = text.match(/【概述】\s*([\s\S]*?)(?=【条目】|$)/);
+  const enMatch = text.match(/【条目】\s*([\s\S]*)$/);
+  if (ovMatch || enMatch) {
+    const overview = ovMatch ? ovMatch[1].trim() : "";
+    const entries = [];
+    if (enMatch) {
+      const blocks = enMatch[1].trim().split(/\n\s*\n/);
+      for (const block of blocks) {
+        const lines = block.trim().split('\n');
+        if (lines.length < 2) continue;
+        const titleLine = lines[0].trim();
+        const dateM = titleLine.match(/\[([^\]]*)\]/);
+        const titleM = titleLine.match(/《([^》]*)》/);
+        const linkLine = lines[lines.length - 1].trim();
+        const link = /^https?:\/\/\S+/.test(linkLine) ? linkLine : "";
+        const summaryLines = lines.slice(1, link ? -1 : lines.length);
+        const summary = summaryLines.join(' ').trim();
+        if (titleM && link) {
+          entries.push({date:dateM?dateM[1]:"", title:titleM[1], summary:summary||linkLine, link});
+        }
+      }
+    }
+    return {overview, entries};
+  }
+
+  // ── 旧格式兜底：- [日期] 《标题》—— 摘要 —— 链接 ──
+  const lines = text.split('\n');
+  const overviewLines = [];
+  const entries = [];
+  let inEntries = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const m = line.match(/^-\s*(?:\[([^\]]*)\]\s*)?《([^》]*)》\s*[—\-–]{1,2}\s*(.+)\s*[—\-–]{1,2}\s*(https?:\/\/\S+)/);
+    if (m) {
+      inEntries = true;
+      entries.push({date:m[1]||"", title:m[2], summary:m[3].trim(), link:m[4]});
+    } else if (!inEntries) {
+      overviewLines.push(rawLine);
+    }
+  }
+  return {overview:overviewLines.join('\n').trim(), entries};
+}
+
+function renderSummaryCards() {
+  const outEl = document.getElementById("sumOut");
+  const total = Math.ceil(_sumEntries.length / SUM_PAGE_SIZE);
+  if (total > 0 && _sumPage >= total) _sumPage = total - 1;
+  const start = _sumPage * SUM_PAGE_SIZE;
+  const page = _sumEntries.slice(start, start + SUM_PAGE_SIZE);
+  let html = "";
+  if (_sumOverview) {
+    html += `<div class="sum-overview">${linkify(escapeHtml(_sumOverview)).replace(/\n/g,"<br>")}</div>`;
+  }
+  html += '<div class="sum-cards-grid">';
+  for (const e of page) {
+    const dateHtml = e.date ? `<div class="sum-card-date">${escapeHtml(e.date)}</div>` : "";
+    html += `<div class="sum-card"${e.link ? ` onclick="window.open('${escapeHtml(e.link)}','_blank')"` : ''} title="${escapeHtml(e.title)}">
+      ${dateHtml}
+      <div class="sum-card-title">${escapeHtml(e.title)}</div>
+      <div class="sum-card-summary">${escapeHtml(e.summary)}</div>
+      <div class="sum-card-link">${escapeHtml(e.originalUrl || e.link)}</div></tooltip>
+    </div>`;
+  }
+  html += '</div>';
+  if (total > 1) {
+    html += `<div class="sum-pagination">
+      <button class="sum-page-btn" ${_sumPage===0?'disabled':''} onclick="goSummaryPage(${_sumPage-1})">◀</button>
+      <span class="sum-page-info">第 ${_sumPage+1} / ${total} 页（共 ${_sumEntries.length} 条）</span>
+      <button class="sum-page-btn" ${_sumPage>=total-1?'disabled':''} onclick="goSummaryPage(${_sumPage+1})">▶</button>
+    </div>`;
+  }
+  outEl.innerHTML = html;
+}
+
+function goSummaryPage(p) {
+  _sumPage = p;
+  renderSummaryCards();
+  document.getElementById("sumOut").scrollIntoView({behavior:"smooth"});
+}
+
 const DISCOVERY_WARNING_CHANNELS = new Set([
   "discovery", "site-search", "site-search-api", "sitemap", "feed", "category",
   "freecms-recent"
@@ -278,41 +418,48 @@ function showError(msg) {
 }
 
 async function run() {
-  const startUrl = document.getElementById("url").value.trim();
+  const startUrl = "http://www.yngp.com/";
   const keywords = document.getElementById("kw").value.trim().split(/\s+/).filter(Boolean);
-  const depth = parseInt(document.getElementById("depth").value, 10);
   const renderMode = document.getElementById("render").value;
-  if (!/^https?:\/\/.+/.test(startUrl)) { showError("请输入合法的 http/https 起始网址"); return; }
   if (!keywords.length) { showError("请输入至少一个关键词"); return; }
+  _abort = new AbortController();
+  btn.textContent = "结束搜索";
+  btn.style.background = "#c0392b";
   searchId = null;
   aiSection.hidden = true;
   document.getElementById("sumOut").textContent = "";
   document.getElementById("sumErr").textContent = "";
   document.getElementById("qaList").innerHTML = "";
-  btn.disabled = true;
   const hint = renderMode === "archive" ? "，归档深扫会翻完栏目全部列表页并抓取全部文章正文，可能需要 10–20 分钟"
     : renderMode === "on" ? "，浏览器渲染抓取较慢，最长约 120 秒，达到预算会返回部分结果"
     : renderMode === "auto" ? "，若静态结果不完整会自动渲染补搜，最长约 120 秒"
-    : depth > 1 ? "，深度抓取最长约 120 秒，达到预算会返回部分结果" : "，通常需要 10–40 秒";
-  out.innerHTML = `<div class="status"><span class="spinner"></span>正在按深度 ${depth} 层抓取页面并搜索${hint}…</div>`;
+    : "，全量抓取最长约 120 秒，达到预算会返回部分结果";
+  out.innerHTML = `<div class="status"><span class="spinner"></span>正在全量抓取页面并搜索${hint}…</div>`;
   try {
     const resp = await fetch("/api/search", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({startUrl, keywords, depth, render: renderMode})
+      body: JSON.stringify({startUrl, keywords, depth: 3, render: renderMode}),
+      signal: _abort.signal,
     });
     const data = await resp.json();
     if (!resp.ok) { showError(data.detail || "搜索失败"); return; }
     render(data);
   } catch (e) {
-    showError("无法连接搜索服务：" + e.message);
+    if (e.name === "AbortError") {
+      out.innerHTML = '<div class="status" style="color:#8a5a00">搜索已取消</div>';
+    } else {
+      showError("无法连接搜索服务：" + e.message);
+    }
   } finally {
-    btn.disabled = false;
+    _abort = null;
+    btn.textContent = "搜索";
+    btn.style.background = "";
   }
 }
 
 function render(data) {
   searchId = data.searchId || null;
-  aiSection.hidden = !searchId;
+  aiSection.hidden = !searchId || !data.aiAvailable;
   const resultValues = Array.isArray(data.results) ? data.results : [];
   const el = document.getElementById("expandLine");
   if (data.expandedKeywords && data.expandedKeywords.length) {
@@ -333,7 +480,7 @@ function render(data) {
   const formattedWarnings = [...new Set(
     warningValues.map(formatDiscoveryWarning).filter(Boolean)
   )].slice(0, 5);
-  let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（深度 ${data.depth} 层${data.render ? "，JS 渲染" : ""}${
+  let html = `<p class="meta-line">共抓取 ${data.pagesCrawled} 个页面（全量${data.render ? "，JS 渲染" : ""}${
     data.siteSearch && data.siteSearch.pagesFetched > 0
       ? `，站内搜索补充 ${data.siteSearch.pagesFetched} 页` : ""}），正文命中 ${
     escapeHtml(String(data.totalHits))} 处，标题召回 ${
@@ -355,7 +502,7 @@ function render(data) {
       const matchStrengthLabel = page.matchStrength === "weak"
         ? "标题召回" : "正文命中";
       html += `<div class="card"><h2><a href="${escapeHtml(page.pageUrl)}" target="_blank" rel="noopener">${
-        escapeHtml(page.pageTitle || page.pageUrl)}</a>
+        escapeHtml(page.displayTitle || page.pageTitle || page.pageUrl)}</a>
         <span class="badge">${escapeHtml(matchStrengthLabel)}</span>
         <span class="linkref">${escapeHtml(page.pageUrl)}</span></h2>`;
       for (const hit of page.hits) {
@@ -386,9 +533,15 @@ function render(data) {
   out.innerHTML = html;
 }
 
-btn.addEventListener("click", run);
+let _abort = null;
+
+btn.addEventListener("click", () => {
+  if (_abort) { _abort.abort(); _abort = null; } else { run(); }
+});
 document.getElementById("kw").addEventListener("keydown", e => {
-  if (e.key === "Enter") run();
+  if (e.key === "Enter") {
+    if (_abort) { _abort.abort(); _abort = null; } else { run(); }
+  }
 });
 
 document.getElementById("sumBtn").addEventListener("click", async (e) => {
@@ -401,11 +554,29 @@ document.getElementById("sumBtn").addEventListener("click", async (e) => {
   try {
     await streamSSE("/api/summarize", {searchId}, (d) => {
       text += d; renderStreamText(outEl, text, true);
+    }, (evt) => {
+      if (evt.type === "parsed") {
+        _sumOverview = evt.overview || "";
+        _sumEntries = evt.entries || [];
+        _sumPage = 0;
+        if (_sumEntries.length || _sumOverview) renderSummaryCards();
+      }
     });
-    renderStreamText(outEl, text, false);
+    // 兜底：若服务端未下发 parsed 事件，客户端自行解析
+    if (!_sumEntries.length && !_sumOverview) {
+      const parsed = parseSummaryEntries(text);
+      _sumOverview = parsed.overview;
+      _sumEntries = parsed.entries;
+      _sumPage = 0;
+      renderSummaryCards();
+    }
   } catch (err) {
     renderStreamText(outEl, text, false);
-    errEl.textContent = "AI 摘要失败：" + err.message;
+    if (/DEEPSEEK_API_KEY|API_KEY|api.key/i.test(err.message)) {
+      errEl.textContent = "AI 功能需配置 DEEPSEEK_API_KEY 环境变量";
+    } else {
+      errEl.textContent = "AI 摘要失败：" + err.message;
+    }
   } finally { btn.disabled = false; }
 });
 
@@ -451,9 +622,8 @@ jobKindSel.addEventListener("change", () => {
 });
 
 document.getElementById("jobFill").addEventListener("click", () => {
-  document.getElementById("jobUrl").value = document.getElementById("url").value;
+  document.getElementById("jobUrl").value = "http://www.yngp.com/";
   document.getElementById("jobKw").value = document.getElementById("kw").value;
-  document.getElementById("jobDepth").value = document.getElementById("depth").value;
   document.getElementById("jobRender").value = document.getElementById("render").value;
 });
 
@@ -494,6 +664,14 @@ async function loadJobs() {
       } else {
         resultLine = `<div class="job-result">尚未运行</div>`;
       }
+      const aiSummary = j.lastResult && j.lastResult.aiSummary;
+      const aiBtnClass = aiSummary && aiSummary.entries && aiSummary.entries.length
+        ? "job-sum-btn has-new" : "job-sum-btn";
+      const aiSectionHtml = aiSummary ? `
+        <div class="job-ai-summary" id="jas-${j.id}">
+          ${aiSummary.overview ? `<div class="job-ai-overview">${linkify(escapeHtml(aiSummary.overview)).replace(/\n/g,"<br>")}</div>` : ""}
+          ${renderJobAiCards(aiSummary.entries || [])}
+        </div>` : "";
       return `<div class="job-row">
         <div class="job-head">
           <label class="switch" title="启用/停用">
@@ -503,10 +681,12 @@ async function loadJobs() {
           <span class="job-name">${escapeHtml(title)}</span>
           <span class="job-sched">${escapeHtml(j.scheduleText)}${j.enabled ? " · 下次 " + fmtTime(j.nextRun) : "（已停用）"}</span>
         </div>
-        <div class="job-meta">${escapeHtml(j.startUrl)} · 关键词：${j.keywords.map(k => escapeHtml(k)).join("、")} · 深度 ${j.depth} 层${j.render !== "auto" ? " · " + (j.render === "on" ? "强制渲染" : "仅静态") : ""}</div>
+        <div class="job-meta">${escapeHtml(j.startUrl)} · 关键词：${j.keywords.map(k => escapeHtml(k)).join("、")}${j.render !== "auto" ? " · " + (j.render === "on" ? "强制渲染" : "仅静态") : ""}</div>
         ${resultLine}
+        ${aiSectionHtml}
         <div class="job-ops">
           <button data-act="run" data-id="${j.id}">立即运行</button>
+          ${aiSummary ? `<button class="${aiBtnClass}" data-act="sum" data-id="${j.id}">AI 概括${aiSummary.entries && aiSummary.entries.length ? ` (${aiSummary.entries.length})` : ""}</button>` : ""}
           <button data-act="del" data-id="${j.id}" class="danger">删除</button>
         </div>
       </div>`;
@@ -520,6 +700,11 @@ document.getElementById("jobList").addEventListener("click", async (e) => {
   const t = e.target.closest("[data-act]");
   if (!t) return;
   const id = t.dataset.id, act = t.dataset.act;
+  if (act === "sum") {
+    const el = document.getElementById("jas-" + id);
+    if (el) el.classList.toggle("show");
+    return;
+  }
   if (act === "del" && !confirm("确定删除这个定时任务？")) return;
   const url = act === "run" ? `/api/jobs/${id}/run`
             : act === "del" ? `/api/jobs/${id}` : null;
@@ -558,7 +743,7 @@ document.getElementById("jobCreate").addEventListener("click", async (e) => {
       body: JSON.stringify({
         name: document.getElementById("jobName").value.trim(),
         startUrl, keywords,
-        depth: parseInt(document.getElementById("jobDepth").value, 10),
+        depth: 3,
         render: document.getElementById("jobRender").value,
         schedule
       })
@@ -571,6 +756,22 @@ document.getElementById("jobCreate").addEventListener("click", async (e) => {
     jobErr("创建失败：" + err.message);
   } finally { btnEl.disabled = false; }
 });
+
+function renderJobAiCards(entries) {
+  if (!entries || !entries.length) return "";
+  let html = '<div class="job-ai-cards">';
+  for (const e of entries) {
+    const dateHtml = e.date ? `<div class="job-ai-card-date">${escapeHtml(e.date)}</div>` : "";
+    html += `<div class="job-ai-card"${e.link ? ` onclick="event.stopPropagation();window.open('${escapeHtml(e.link)}','_blank')"` : ''} title="${escapeHtml(e.title)}">
+      ${dateHtml}
+      <div class="job-ai-card-title">${escapeHtml(e.title)}</div>
+      <div class="job-ai-card-summary">${escapeHtml(e.summary)}</div>
+      <div class="job-ai-card-link">${escapeHtml(e.link)}</div>
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
 
 loadJobs();
 setInterval(loadJobs, 30000);

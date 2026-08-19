@@ -277,9 +277,14 @@ async def _test_collect_pages_plain_site_unavailable(site_server):
     assert info["pagesFetched"] == 0
 
 
-def test_search_api_supplements_via_site_search(search_site):
+def test_search_api_supplements_via_site_search(search_site, monkeypatch):
     from fastapi.testclient import TestClient
     import server as server_mod
+
+    async def no_expand(kw, host):
+        return []
+
+    monkeypatch.setattr(server_mod, "expand_keywords", no_expand)
     client = TestClient(server_mod.app)
     resp = client.post("/api/search", json={
         "startUrl": f"{search_site}/index.html",

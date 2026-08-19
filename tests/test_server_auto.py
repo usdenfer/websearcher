@@ -73,8 +73,8 @@ def test_auto_keeps_static_when_render_has_no_more_body_hits(
     calls = _install(
         monkeypatch,
         JS_HTML.replace("</body>", "<p>alpha</p></body>"),
-        "<html><body><p>alpha 正文</p><img src='a.png' alt='alpha 图'>"
-        "<a href='x.html' title='alpha 链接'>x</a></body></html>")
+        "<html><body><p>alpha 正文</p><img src='a.png' alt='other'>"
+        "<a href='x.html' title='other'>x</a></body></html>")
     data = _post(site_server).json()
     assert calls == [False, True]
     assert data["render"] is False
@@ -104,7 +104,7 @@ def test_invalid_render_mode_rejected(site_server):
     assert _post(site_server, render="maybe").status_code == 422
 
 
-def test_auto_static_render_and_discovery_share_120_attempt_budget(
+def test_auto_static_render_and_discovery_share_budget(
         monkeypatch, site_server):
     budgets = []
 
@@ -128,7 +128,7 @@ def test_auto_static_render_and_discovery_share_120_attempt_budget(
         attempted = 0
         while budget.reserve_html():
             attempted += 1
-        assert attempted == 60
+        assert attempted == 100
         return DiscoveryRun(
             pages=[],
             failed=[],
@@ -145,4 +145,4 @@ def test_auto_static_render_and_discovery_share_120_attempt_budget(
 
     assert response.status_code == 200
     assert len({id(item) for item in budgets}) == 1
-    assert budgets[0].used_html_pages == 120
+    assert budgets[0].used_html_pages == 5000

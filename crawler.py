@@ -17,6 +17,7 @@ from discovery.urltools import (
     normalize_candidate_url,
     same_site_boundary,
 )
+from matcher import extract_published_date
 
 MAX_SUBPAGES = 5000
 MAX_TOTAL_PAGES = 5000
@@ -418,7 +419,8 @@ async def crawl(start_url: str, depth: int = 1,
                 max_pages: int = MAX_TOTAL_PAGES,
                 render: bool = False,
                 deadline: float | None = None,
-                budget: Any | None = None) -> CrawlResult:
+                budget: Any | None = None,
+                since: str | None = None) -> CrawlResult:
     """Fetch start page and its same-site pages level by level (BFS).
 
     depth=1 crawls the start page plus pages it directly links to;
@@ -429,9 +431,11 @@ async def crawl(start_url: str, depth: int = 1,
     render=True 时用 headless Chromium 渲染每个页面（JS 动态站点），
     链接取自渲染后的 DOM（含翻页发现的链接），页数上限为
     RENDER_MAX_PAGES。
+    since 为 YYYY-MM-DD 格式的时间下限，抓取后若页面发布日期已知且早于
+    since 则跳过该页面、不继续跟踪其链接。
     """
     if render:
-        kwargs = {"max_pages": max_pages, "deadline": deadline}
+        kwargs = {"max_pages": max_pages, "deadline": deadline, "since": since}
         if budget is not None:
             kwargs["budget"] = budget
         return await _crawl_render(start_url, depth, **kwargs)
@@ -517,6 +521,11 @@ async def crawl(start_url: str, depth: int = 1,
                         {"url": url, "reason": describe_error(exc)})
                     return None
                 fetched = _as_fetched_html(value, url)
+                if since:
+                    page_date = extract_published_date(
+                        fetched.html, fetched.final_url)
+                    if page_date and page_date < since:
+                        return None
                 return CrawledPage(
                     url=fetched.final_url,
                     html=fetched.html,
@@ -560,9 +569,11 @@ async def crawl(start_url: str, depth: int = 1,
 async def _crawl_render(start_url: str, depth: int,
                         max_pages: int = RENDER_MAX_PAGES,
                         deadline: float | None = None,
-                        budget: Any | None = None) -> CrawlResult:
+                        budget: Any | None = None,
+                        since: str | None = None) -> CrawlResult:
     """BFS over rendered pages: links come from the live DOM (including
-    pagination harvest), so JS-injected list items are discoverable."""
+    pagination harvest), so JS-injected list items are discoverable.
+    since 为 YYYY-MM-DD 格式的时间下限，发布日早于 since 的页面将被跳过。"""
     import renderer
 
     result = CrawlResult()
@@ -646,6 +657,11 @@ async def _crawl_render(start_url: str, depth: int,
                 "reason": "重定向到站外地址",
             })
             return None
+        if since:
+            page_date = extract_published_date(
+                rendered.html, rendered.final_url)
+            if page_date and page_date < since:
+                return None
         return (
             CrawledPage(url=rendered.final_url, html=rendered.html),
             rendered.links,
@@ -692,6 +708,11 @@ async def _crawl_render(start_url: str, depth: int,
                             {"url": url, "reason": describe_error(exc)})
                         return None
                     fetched = _as_fetched_html(value, url)
+                    if since:
+                        page_date = extract_published_date(
+                            fetched.html, fetched.final_url)
+                        if page_date and page_date < since:
+                            return None
                     return CrawledPage(
                         url=fetched.final_url,
                         html=fetched.html,
@@ -789,7 +810,8 @@ ARCHIVE_BUDGET_SECONDS = 1200
 
 async def crawl_archive(start_url: str,
                         deadline: float | None = None,
-                        budget: Any | None = None) -> CrawlResult:
+                        budget: Any | None = None,
+                        since: str | None = None) -> CrawlResult:
     """归档深扫：渲染起始页与栏目列表（含全量翻页收割），把发现的
     全部文章链接的正文静态抓回。
 
@@ -797,6 +819,7 @@ async def crawl_archive(start_url: str,
     不含关键词的旧文、正文独有的词都覆盖不到；归档深扫以时间为代价
     （可能 10~20 分钟）换取正文全覆盖。起始页渲染失败会抛出，其余
     失败收集进 CrawlResult.failed。
+    since 为 YYYY-MM-DD 格式的时间下限，发布日早于 since 的文章将被跳过。
     """
     import renderer
 
@@ -918,6 +941,11 @@ async def crawl_archive(start_url: str,
                         {"url": url, "reason": describe_error(exc)})
                     return None
                 fetched = _as_fetched_html(value, url)
+                if since:
+                    page_date = extract_published_date(
+                        fetched.html, fetched.final_url)
+                    if page_date and page_date < since:
+                        return None
                 return CrawledPage(url=fetched.final_url, html=fetched.html)
 
         fetched, _ = await gather_before_deadline(

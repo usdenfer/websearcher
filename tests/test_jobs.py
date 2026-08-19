@@ -206,12 +206,12 @@ def test_run_job_reuses_base_and_deduplicates_discovery_pages(
 
     assert calls["base"] is base
     assert calls["args"] == (
-        "https://x.test/", ["alpha"], 1, "off",
+        "https://x.test/", ["alpha"], 3, "off",
     )
     assert calls["kwargs"]["budget"] is calls["crawl_budget"]
-    assert calls["crawl_budget"].initial_pages == 60
-    assert calls["crawl_budget"].max_pages == 120
-    assert calls["crawl_budget"].timeout_seconds == 120
+    assert calls["crawl_budget"].initial_pages == 3000
+    assert calls["crawl_budget"].max_pages == 5000
+    assert calls["crawl_budget"].timeout_seconds == 86400
     assert (
         calls["crawl_kwargs"]["max_pages"]
         == jobs.BASE_BFS_PAGE_BUDGET
@@ -261,9 +261,9 @@ def test_run_job_uses_shared_special_zycg_budget(tmp_path):
     assert "error" not in result
     crawl_budget = calls["crawl"]["budget"]
     assert calls["discovery"]["budget"] is crawl_budget
-    assert crawl_budget.initial_pages == 150
-    assert crawl_budget.max_pages == 300
-    assert crawl_budget.timeout_seconds == 300
+    assert crawl_budget.initial_pages == 3000
+    assert crawl_budget.max_pages == 5000
+    assert crawl_budget.timeout_seconds == 86400
     assert calls["crawl"]["max_pages"] == jobs.BASE_BFS_PAGE_BUDGET
 
 

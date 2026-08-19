@@ -106,9 +106,9 @@ class DiscoveryStats:
 
 @dataclass
 class BudgetManager:
-    initial_pages: int = 60
-    max_pages: int = 120
-    timeout_seconds: float = 120.0
+    initial_pages: int = 3000
+    max_pages: int = 5000
+    timeout_seconds: float = 86400.0
     used_html_pages: int = 0
     page_limit: int = field(init=False)
     started_at: float = field(default_factory=time.monotonic)

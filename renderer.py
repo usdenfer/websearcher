@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-RENDER_TIMEOUT_MS = 25_000
+RENDER_TIMEOUT_MS = 60_000
 NETWORK_IDLE_MS = 6_000
 MAX_PAGINATION_CLICKS = 100
 PAGINATION_SETTLE_MS = 1_000
@@ -299,7 +299,11 @@ async def render_page_result(
                             blocked_navigation = request.url
                             await route.abort("blockedbyclient")
                             return
-                        response = await route.fetch(max_redirects=0)
+                        try:
+                            response = await route.fetch(max_redirects=0)
+                        except Exception:
+                            await route.continue_()
+                            return
                         current_url = response.url
                         current_response = response
                         extra_responses = []
@@ -331,13 +335,17 @@ async def render_page_result(
                                     await route.abort("blockedbyclient")
                                     return
                                 current_url = target
-                                current_response = (
-                                    await page.context.request.get(
-                                        target,
-                                        max_redirects=0,
-                                        fail_on_status_code=False,
+                                try:
+                                    current_response = (
+                                        await page.context.request.get(
+                                            target,
+                                            max_redirects=0,
+                                            fail_on_status_code=False,
+                                        )
                                     )
-                                )
+                                except Exception:
+                                    await route.continue_()
+                                    return
                                 extra_responses.append(current_response)
                             else:
                                 blocked_navigation = current_url

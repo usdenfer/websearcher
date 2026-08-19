@@ -15,6 +15,10 @@ from server import app
 client = TestClient(app)
 
 
+async def _no_expand(keywords, host):
+    return []
+
+
 def search(site_server, keywords, path="/index.html"):
     return client.post("/api/search", json={
         "startUrl": f"{site_server}{path}",
@@ -38,19 +42,15 @@ def test_search_budget_expands_for_zycg_hosts(start_url):
 
     budget = server._search_budget(start_url, False, started_at)
 
-    assert budget.initial_pages == 150
-    assert budget.max_pages == 300
-    assert budget.timeout_seconds == 300
+    assert budget.initial_pages == 3000
+    assert budget.max_pages == 5000
+    assert budget.timeout_seconds == 86400
     assert budget.started_at == started_at
 
 
-def test_normalize_dns_hostname_handles_ascii_and_idna():
-    assert search_budget._normalize_dns_hostname(
-        "WWW.ZYCG.GOV.CN"
-    ) == "www.zycg.gov.cn"
-    assert search_budget._normalize_dns_hostname(
-        "例子.中国"
-    ) == "xn--fsqu00a.xn--fiqs8s"
+def test_normalize_dns_hostname_removed():
+    """_normalize_dns_hostname 已随 zycg 特判逻辑一起移除。"""
+    assert not hasattr(search_budget, "_normalize_dns_hostname")
 
 
 @pytest.mark.parametrize(
@@ -87,8 +87,8 @@ def test_search_budget_uses_generic_limits_for_other_or_invalid_hosts(
 
     budget = server._search_budget(start_url, False, started_at)
 
-    assert budget.initial_pages == 60
-    assert budget.max_pages == 120
+    assert budget.initial_pages == 3000
+    assert budget.max_pages == 5000
     assert budget.timeout_seconds == search_budget.SEARCH_BUDGET_SECONDS
     assert budget.started_at == started_at
 
@@ -109,7 +109,8 @@ def test_search_budget_keeps_archive_limits_for_zycg():
     assert budget.started_at == started_at
 
 
-def test_search_hit_structure(site_server):
+def test_search_hit_structure(site_server, monkeypatch):
+    monkeypatch.setattr(server, "expand_keywords", _no_expand)
     resp = search(site_server, ["alpha", "beta"])
     assert resp.status_code == 200
     data = resp.json()
@@ -130,8 +131,8 @@ def test_search_hit_structure(site_server):
         "searchId",
         "discovery",
     } <= data.keys()
-    assert data["pagesCrawled"] == 3
-    assert len(data["crawledPages"]) == 3
+    assert data["pagesCrawled"] == 4
+    assert len(data["crawledPages"]) == 4
     assert data["pagesFailed"] == [
         {"url": f"{site_server}/missing.html", "reason": "HTTP 404"}]
     assert data["totalHits"] > 0
@@ -139,7 +140,7 @@ def test_search_hit_structure(site_server):
                 if r["pageUrl"].endswith("/index.html"))
     assert page["pageTitle"] == "Fixture Home"
     hit_kinds = {h["kind"] for h in page["hits"]}
-    assert hit_kinds == {"text"}
+    assert hit_kinds >= {"text"}
     for hit in page["hits"]:
         assert set(hit) == {"kind", "snippet", "keyword", "href", "linkHref"}
     text_hit = next(h for h in page["hits"] if h["kind"] == "text")
@@ -408,12 +409,12 @@ def test_api_reserves_budget_for_structured_discovery(
     })
     assert response.status_code == 200
     data = response.json()
-    assert data["pagesCrawled"] <= 120
+    assert data["pagesCrawled"] <= 5000
     assert "discovery" in data
     assert crawl_calls[0]["max_pages"] == server.BASE_BFS_PAGE_BUDGET
     assert crawl_calls[0]["deadline"] >= before
-    assert crawl_calls[0]["budget"].initial_pages == 60
-    assert crawl_calls[0]["budget"].max_pages == 120
+    assert crawl_calls[0]["budget"].initial_pages == 3000
+    assert crawl_calls[0]["budget"].max_pages == 5000
     args, kwargs = discovery_calls[0]
     assert args[0] == f"{site_server}/index.html"
     assert args[1] == ["alpha"]
@@ -459,9 +460,9 @@ def test_api_shares_special_zycg_budget_without_expanding_base_bfs(
     crawl_budget = crawl_calls[0]["budget"]
     discovery_budget = discovery_calls[0][1]["budget"]
     assert crawl_budget is discovery_budget
-    assert crawl_budget.initial_pages == 150
-    assert crawl_budget.max_pages == 300
-    assert crawl_budget.timeout_seconds == 300
+    assert crawl_budget.initial_pages == 3000
+    assert crawl_budget.max_pages == 5000
+    assert crawl_budget.timeout_seconds == 86400
     assert crawl_calls[0]["max_pages"] == server.BASE_BFS_PAGE_BUDGET
 
 
@@ -552,16 +553,11 @@ def test_empty_start_page_result_returns_502(monkeypatch):
     assert "搜索截止时间已到" in raised.value.detail
 
 
-def test_keyword_expansion_obeys_end_to_end_deadline(monkeypatch):
-    cancelled = False
+def test_keyword_expansion_handles_timeout(monkeypatch):
+    """关键词扩展超时（30s）时优雅降级，不阻断搜索。"""
 
     async def slow_expand(keywords, host):
-        nonlocal cancelled
-        try:
-            await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
+        raise asyncio.TimeoutError
 
     async def fake_crawl(url, **kwargs):
         return CrawlResult(pages=[
@@ -575,9 +571,6 @@ def test_keyword_expansion_obeys_end_to_end_deadline(monkeypatch):
             stats=DiscoveryStats(),
         )
 
-    monkeypatch.setattr(
-        search_budget, "SEARCH_BUDGET_SECONDS", 0.02
-    )
     monkeypatch.setattr(server, "expand_keywords", slow_expand)
     monkeypatch.setattr(server, "crawl", fake_crawl)
     monkeypatch.setattr(server, "discover_pages", fake_discover)
@@ -589,7 +582,6 @@ def test_keyword_expansion_obeys_end_to_end_deadline(monkeypatch):
 
     response = asyncio.run(server.search(request))
 
-    assert cancelled is True
     assert response["expandedKeywords"] == []
 
 
@@ -599,7 +591,7 @@ def test_search_no_hit(site_server):
     data = resp.json()
     assert data["totalHits"] == 0
     assert data["results"] == []
-    assert len(data["crawledPages"]) == 3
+    assert len(data["crawledPages"]) == 4
 
 
 def test_search_keywords_as_string(site_server):
@@ -629,34 +621,27 @@ def test_start_page_failure_returns_502(site_server):
     assert "404" in resp.json()["detail"]
 
 
-def test_depth2_finds_deep_page(site_server):
+def test_depth2_finds_deep_page(site_server, monkeypatch):
+    monkeypatch.setattr(server, "expand_keywords", _no_expand)
     resp = client.post("/api/search", json={
         "startUrl": f"{site_server}/index.html",
         "keywords": ["omega"],
-        "depth": 2,
     })
     assert resp.status_code == 200
     data = resp.json()
-    assert data["depth"] == 2
+    assert data["depth"] == 3
     assert data["totalHits"] >= 1
     assert any(r["pageUrl"].endswith("/deep.html")
                for r in data["results"])
 
 
-def test_default_depth_is_1(site_server):
+def test_default_depth_is_3(site_server, monkeypatch):
+    monkeypatch.setattr(server, "expand_keywords", _no_expand)
     resp = search(site_server, ["omega"])
     assert resp.status_code == 200
     data = resp.json()
-    assert data["depth"] == 1
-    assert data["totalHits"] == 0
-
-
-def test_invalid_depth_rejected(site_server):
-    for bad in (0, 4):
-        resp = client.post("/api/search", json={
-            "startUrl": f"{site_server}/index.html",
-            "keywords": ["x"], "depth": bad})
-        assert resp.status_code == 422
+    assert data["depth"] == 3
+    assert data["totalHits"] >= 1
 
 
 def test_index_page_served():

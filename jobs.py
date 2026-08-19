@@ -454,6 +454,13 @@ async def run_job(store: JobStore, job_id: str,
     try:
         mode = job.get("render", "auto")
         archive_mode = mode == "archive"
+        last_run_at = _parse_dt(job.get("lastRunAt"))
+        is_baseline = job.get("lastResult") is None
+        since_str = (
+            last_run_at.strftime("%Y-%m-%d")
+            if not is_baseline and last_run_at is not None
+            else None
+        )
         search_started = time.monotonic()
         budget = make_search_budget(
             job["startUrl"],
@@ -477,6 +484,7 @@ async def run_job(store: JobStore, job_id: str,
                     job["startUrl"],
                     deadline=deadline,
                     budget=budget,
+                    since=since_str,
                 )
                 _require_crawl_pages(crawl_result)
                 render_used = True
@@ -488,6 +496,7 @@ async def run_job(store: JobStore, job_id: str,
                     render=True,
                     deadline=deadline,
                     budget=budget,
+                    since=since_str,
                 )
                 _require_crawl_pages(crawl_result)
                 render_used = True
@@ -499,14 +508,15 @@ async def run_job(store: JobStore, job_id: str,
                     render=False,
                     deadline=deadline,
                     budget=budget,
+                    since=since_str,
                 )
                 _require_crawl_pages(crawl_result)
                 if mode == "auto" and crawl_result.pages:
                     from matcher import (
                         looks_js_driven,
-                        match_body_crawl_result,
+                        match_crawl_result,
                     )
-                    _, static_hits = match_body_crawl_result(
+                    _, static_hits = match_crawl_result(
                         crawl_result.pages, all_keywords)
                     if static_hits == 0 or (
                             looks_js_driven(crawl_result.pages[0].html)
@@ -518,8 +528,9 @@ async def run_job(store: JobStore, job_id: str,
                             render=True,
                             deadline=deadline,
                             budget=budget,
+                            since=since_str,
                         )
-                        _, render_hits = match_body_crawl_result(
+                        _, render_hits = match_crawl_result(
                             render_result.pages, all_keywords)
                         if render_hits > static_hits:
                             crawl_result = render_result
@@ -531,7 +542,7 @@ async def run_job(store: JobStore, job_id: str,
             return {"error": error}
 
         from discovery.urltools import normalize_candidate_url
-        from matcher import match_body_crawl_result
+        from matcher import match_crawl_result
         if archive_mode:
             # 归档深扫已全量发现，跳过 discovery 避免重复翻页
             discovery_run = None
@@ -560,14 +571,12 @@ async def run_job(store: JobStore, job_id: str,
                 raise
             except Exception:  # noqa: BLE001 - 站内搜索失败不影响任务
                 pass
-        results, total_hits = match_body_crawl_result(
+        results, total_hits = match_crawl_result(
             crawl_result.pages, all_keywords)
         keys = hit_keys(results)
         prev = set(job.get("prevKeys") or [])
 
         # ── 时间窗口：只统计上次运行至今的新增条目 ──
-        last_run_at = _parse_dt(job.get("lastRunAt"))
-        is_baseline = job.get("lastResult") is None
         if not is_baseline and last_run_at is not None:
             time_results = _filter_results_by_time(results, last_run_at)
         else:

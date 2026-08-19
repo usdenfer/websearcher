@@ -18,6 +18,13 @@ def proactor_loop_factory():
         return asyncio.ProactorEventLoop()
     return asyncio.new_event_loop()
 
+if getattr(sys, 'frozen', False):
+    _exe_dir = Path(sys.executable).parent
+    _browsers = _exe_dir / "playwright"
+    if _browsers.is_dir():
+        import os
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_browsers))
+
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -26,7 +33,7 @@ from pydantic import BaseModel, field_validator
 
 from crawler import (PAGE_TIMEOUT, USER_AGENT, CrawlResult, crawl,
                      crawl_archive, describe_error, fetch_html)
-from ai import (AIError, ask_prompt, chat_stream, expand_keywords,
+from ai import (AIError, api_key, ask_prompt, chat_stream, expand_keywords,
                 parse_ai_entries, summarize_prompt)
 from cache import get as cache_get
 from cache import put as cache_put
@@ -40,7 +47,7 @@ from locator import build_locate_page
 from matcher import (
     extract_main_text,
     looks_js_driven,
-    match_body_crawl_result,
+    match_crawl_result,
     match_body_with_recall,
 )
 from search_budget import (
@@ -121,7 +128,7 @@ async def _crawl_or_502(url: str, depth: int, render: bool,
 
 
 def _match_crawl(crawl_result, all_keywords: list[str]) -> tuple[list, int]:
-    return match_body_crawl_result(crawl_result.pages, all_keywords)
+    return match_crawl_result(crawl_result.pages, all_keywords)
 
 
 def _search_budget(
@@ -260,6 +267,7 @@ async def search(req: SearchRequest) -> dict:
         "render": render_used,
         "renderMode": req.render,
         "autoNote": auto_note,
+        "aiAvailable": bool(api_key()),
         "discovery": discovery_run.stats.as_dict(),
         "siteSearch": {
             "available": (
@@ -760,9 +768,21 @@ if __name__ == "__main__":
         help="单进程运行（不做文件变更自动重启），停止时不留 worker 进程",
     )
     args = parser.parse_args()
-    # reload=True: dev server auto-restarts when Python files change,
-    # so the preview never serves stale backend code; --no-reload keeps one
-    # process for the launcher so its process tree can be stopped cleanly.
-    uvicorn.run("server:app", host=args.host, port=args.port,
-                reload=not args.no_reload,
-                loop="server:proactor_loop_factory")
+    if getattr(sys, 'frozen', False):
+        import threading
+        import webview
+        url = f"http://{args.host}:{args.port}"
+
+        def _start_server():
+            uvicorn.run(app, host=args.host, port=args.port)
+
+        threading.Thread(target=_start_server, daemon=True).start()
+        webview.create_window(
+            "云南政府采购网 — 站内关键词搜索", url,
+            width=1024, height=768, resizable=True,
+        )
+        webview.start()
+    else:
+        uvicorn.run("server:app", host=args.host, port=args.port,
+                    reload=not args.no_reload,
+                    loop="server:proactor_loop_factory")

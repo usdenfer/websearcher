@@ -181,7 +181,11 @@ def test_search_api_accepts_archive_mode(site_server, monkeypatch):
         return crawler.CrawlResult(pages=[
             crawler.CrawledPage(url=url, html="<html><body>正文独有的名字</body></html>")])
 
+    async def fake_expand(keywords, host):
+        return []
+
     monkeypatch.setattr(server_mod, "crawl_archive", fake_archive)
+    monkeypatch.setattr(server_mod, "expand_keywords", fake_expand)
     client = TestClient(server_mod.app)
     resp = client.post("/api/search", json={
         "startUrl": f"{site_server}/index.html",

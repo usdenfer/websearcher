@@ -25,7 +25,7 @@ def api_key() -> str:
 
 
 def base_url() -> str:
-    return os.getenv("AI_BASE_URL", "https://api.deepseek.com")
+    return os.getenv("AI_BASE_URL", "https://api.vectorengine.cn/v1")
 
 
 def model() -> str:
@@ -172,6 +172,16 @@ def parse_ai_entries(text: str) -> tuple[str, list[dict]]:
 
         last_line = lines[-1]
         link = last_line if re.match(r'^https?://', last_line) else ""
+        if not link:
+            for line in lines[1:]:
+                if re.match(r'^https?://', line):
+                    link = line
+                    break
+            for line in reversed(lines):
+                m = re.search(r'(https?://\S+)', line)
+                if m:
+                    link = m.group(1)
+                    break
         summary_lines = lines[1:-1] if link else lines[1:]
         if not link and last_line != first_line:
             summary_lines.append(last_line)

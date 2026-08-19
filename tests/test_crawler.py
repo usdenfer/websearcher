@@ -426,8 +426,8 @@ def test_render_crawl_forwards_max_pages_and_deadline(monkeypatch):
 
     calls = []
 
-    async def fake_render(url, depth, max_pages, deadline):
-        calls.append((url, depth, max_pages, deadline))
+    async def fake_render(url, depth, max_pages, deadline, since=None):
+        calls.append((url, depth, max_pages, deadline, since))
         return crawler.CrawlResult()
 
     monkeypatch.setattr(crawler, "_crawl_render", fake_render)
@@ -439,7 +439,7 @@ def test_render_crawl_forwards_max_pages_and_deadline(monkeypatch):
         render=True,
         deadline=deadline,
     ))
-    assert calls == [("https://render.test/", 3, 17, deadline)]
+    assert calls == [("https://render.test/", 3, 17, deadline, None)]
 
 
 def test_static_start_page_obeys_deadline_and_cancels(monkeypatch):
