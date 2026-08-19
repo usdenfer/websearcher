@@ -1163,6 +1163,7 @@ class YngpProvider(Provider):
         query_types: tuple[str, ...] = DEFAULT_QUERY_TYPES,
         recent_days: int = 30,
         max_windows_per_query: int = 60,
+        full_sweep: bool = True,
     ):
         super().__init__(client, budget, stats, policy)
         self.adapter = adapter
@@ -1171,6 +1172,7 @@ class YngpProvider(Provider):
         self.recent_days = recent_days
         # 单个（关键字 × 类别）组合允许的最大时间窗请求数
         self.max_windows_per_query = max_windows_per_query
+        self.full_sweep = full_sweep
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -1312,22 +1314,23 @@ class YngpProvider(Provider):
         # 全量补拉：对未被类别关键词覆盖的 query_type，
         # 以关键词="" 拉取全部近期公告，交给正文匹配发现标题外命中
         # 先重新预热会话，避免长时间关键词筛选后会话过期
-        await self._warm_session()
-        for query_type in self.query_types:
-            if query_type in unfiltered_types_covered:
-                continue
-            if self.budget.expired():
-                self.stats.partial = True
-                self.stats.note_stop("time-budget")
-                break
-            if self.budget.remaining_seconds() < _FETCH_RESERVE_SECONDS:
-                self.stats.partial = True
-                self.stats.note_stop("time-budget")
-                break
-            window_success = await self._collect_recent(
-                "", query_type, request_limit, result, seen
-            )
-            business_success = business_success or window_success
+        if self.full_sweep:
+            await self._warm_session()
+            for query_type in self.query_types:
+                if query_type in unfiltered_types_covered:
+                    continue
+                if self.budget.expired():
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                    break
+                if self.budget.remaining_seconds() < _FETCH_RESERVE_SECONDS:
+                    self.stats.partial = True
+                    self.stats.note_stop("time-budget")
+                    break
+                window_success = await self._collect_recent(
+                    "", query_type, request_limit, result, seen
+                )
+                business_success = business_success or window_success
 
         if source_was_successful or business_success:
             self.stats.sources_succeeded.add(self.source)

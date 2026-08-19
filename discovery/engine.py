@@ -209,6 +209,7 @@ async def discover_pages(
     query_types: tuple[str, ...] | None = None,
     recent_days: int | None = None,
     max_windows_per_query: int | None = None,
+    full_sweep: bool | None = None,
 ) -> DiscoveryRun:
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
@@ -312,6 +313,8 @@ async def discover_pages(
                 yngp_kwargs["recent_days"] = recent_days
             if max_windows_per_query is not None:
                 yngp_kwargs["max_windows_per_query"] = max_windows_per_query
+            if full_sweep is not None:
+                yngp_kwargs["full_sweep"] = full_sweep
             providers.append(
                 YngpProvider(
                     client, budget, stats, policy, adapter, **yngp_kwargs
