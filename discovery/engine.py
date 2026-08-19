@@ -207,6 +207,7 @@ async def discover_pages(
     skip_urls: Iterable[str] = (),
     budget: BudgetManager | None = None,
     query_types: tuple[str, ...] | None = None,
+    recent_days: int | None = None,
 ) -> DiscoveryRun:
     """Discover and fetch structured candidates independently of BFS depth."""
     del depth
@@ -303,9 +304,11 @@ async def discover_pages(
                 YunnanCmsProvider(client, budget, stats, policy, adapter)
             )
         elif isinstance(adapter, YngpAdapter):
-            yngp_kwargs = (
-                {} if query_types is None else {"query_types": query_types}
-            )
+            yngp_kwargs = {}
+            if query_types is not None:
+                yngp_kwargs["query_types"] = query_types
+            if recent_days is not None:
+                yngp_kwargs["recent_days"] = recent_days
             providers.append(
                 YngpProvider(
                     client, budget, stats, policy, adapter, **yngp_kwargs
